@@ -61,6 +61,12 @@ apiClient.interceptors.request.use(
       return config;
     }
 
+    // Audit H10：呼叫端若已自帶 Authorization（例如登入成功後用「新 token」呼叫 /auth/me），
+    // 攔截器絕不覆蓋，否則會用 store/localStorage 的「舊 token」蓋掉 → 拿到前一位使用者的身分。
+    if (config.headers?.Authorization) {
+      return config;
+    }
+
     let { token, refreshToken, isTokenExpiringSoon } = useAuthStore.getState();
 
     // Try to get token from localStorage if not in memory

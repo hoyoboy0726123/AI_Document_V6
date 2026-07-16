@@ -231,7 +231,12 @@ def get_supersedes_chain(
 def delete_kg_for_document(db: Session, document_id: str) -> int:
     """Remove all KG relations sourced from a given document. Returns count.
 
-    Entities are kept (they may be mentioned in other docs).
+    Shared spec entities (ISO/MIL-STD/…) are kept — they may be mentioned in
+    other docs. But this document's OWN structural entities
+    (canonical_id like ``doc:{id}`` / ``doc:{id}#510.7``) are single-document by
+    nature, so they are purged here to avoid orphan/ghost nodes on delete and
+    stale nodes on re-extract (audit H5 / orphan-section fix). They are rebuilt
+    when extraction re-runs.
     """
     rows = (
         db.query(models.KGRelation)
@@ -241,4 +246,15 @@ def delete_kg_for_document(db: Session, document_id: str) -> int:
     n = len(rows)
     for r in rows:
         db.delete(r)
+
+    # purge this document's own structural entities (doc:{id} and doc:{id}#...)
+    prefix = f"doc:{document_id}"
+    (
+        db.query(models.KGEntity)
+        .filter(
+            (models.KGEntity.canonical_id == prefix)
+            | (models.KGEntity.canonical_id.like(prefix + "#%"))
+        )
+        .delete(synchronize_session=False)
+    )
     return n

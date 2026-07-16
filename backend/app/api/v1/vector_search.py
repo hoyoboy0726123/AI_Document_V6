@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ... import models, schemas
-from ...core.security import get_current_user
+from ...core.security import get_current_user, get_current_admin_user
 from ...database import get_db
 from ...services import ai, vector_store
 
@@ -155,3 +155,29 @@ def vector_health(
         abnormal_chunks=abnormal_chunks,
         document_stats=document_stats,
     )
+
+
+@router.post("/rebuild-index")
+def rebuild_faiss_index(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_admin_user),
+):
+    """從 DB 儲存的 embedding 全量重建 FAISS index（audit H2 逃生門）。
+
+    用於 index 檔損毀、或換 embedding 模型維度改變後修復。admin only。
+    """
+    rows = (
+        db.query(models.DocumentChunk.faiss_id, models.DocumentChunk.embedding)
+        .all()
+    )
+    mapping = {
+        fid: emb
+        for fid, emb in rows
+        if fid is not None and emb  # 跳過無向量（半成品）chunk
+    }
+    rebuilt = vector_store.rebuild_index(mapping)
+    return {
+        "rebuilt_vectors": rebuilt,
+        "total_chunks": len(rows),
+        "skipped_empty": len(rows) - len(mapping),
+    }

@@ -170,6 +170,69 @@ def verify_refresh_token(db: Session, token_string: str) -> models.User:
     return user
 
 
+def rotate_refresh_token(db: Session, token_string: str) -> models.User:
+    """原子輪替 refresh token（audit M：雙花競態 + 重用偵測）。
+
+    舊流程是 verify → revoke → create 三步無鎖：兩個並發請求帶同一 token，
+    可能都在對方 revoke 前通過 verify → 各拿到一組新 token（一票多花）。
+    這裡改為單一原子 UPDATE 搶佔：
+        UPDATE refresh_tokens SET is_revoked=1 WHERE token=:t AND is_revoked=0
+    rowcount==1 者勝出；並發的第二個請求 rowcount==0 → 走「已撤銷被重用」分支。
+
+    重用偵測：token 存在但已撤銷卻又被拿來用 → 視為 token 可能外洩，
+    立刻撤銷該使用者「所有」refresh token（強制全裝置重新登入）。
+    """
+    # 原子搶佔（先標記撤銷，勝者才能換發）
+    claimed = (
+        db.query(models.RefreshToken)
+        .filter(
+            models.RefreshToken.token == token_string,
+            models.RefreshToken.is_revoked == False,  # noqa: E712
+        )
+        .update({models.RefreshToken.is_revoked: True}, synchronize_session=False)
+    )
+    db.commit()
+
+    row = (
+        db.query(models.RefreshToken)
+        .filter(models.RefreshToken.token == token_string)
+        .first()
+    )
+
+    if claimed != 1:
+        if row is not None:
+            # token 存在但已被撤銷 → 重用！撤銷全家（reuse detection）
+            revoke_all_user_tokens(db, row.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token reuse detected; all sessions revoked",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 勝出者：檢查過期與使用者狀態（過期就不換發，token 已撤銷無妨）
+    expires_at_aware = row.expires_at.replace(tzinfo=timezone.utc) if row.expires_at.tzinfo is None else row.expires_at
+    if expires_at_aware < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.query(models.User).filter(models.User.id == row.user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or disabled",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
 def revoke_refresh_token(db: Session, token_string: str) -> bool:
     """
     Revoke a refresh token (e.g., on logout).

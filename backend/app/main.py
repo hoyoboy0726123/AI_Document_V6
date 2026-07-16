@@ -23,18 +23,42 @@ from .database import SessionLocal, engine
 from .services import users as user_service
 
 
-models.Base.metadata.create_all(bind=engine)
+def run_db_migrations() -> bool:
+    """Audit M：以 Alembic 管理 schema，取代啟動時 ad-hoc DDL。
+
+    程式化執行 `alembic upgrade head`（baseline migration 0001 對新/舊 DB 皆冪等）。
+    回傳 True 表示成功；False 表示 alembic 不可用（如 frozen build 未打包 alembic/），
+    呼叫端會退回 legacy 路徑（create_all + ensure_schema_updates）。
+    未來的 schema 變更請新增 alembic revision，不要再往 ensure_schema_updates 加 ALTER。
+    """
+    import os
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    script_dir = os.path.join(backend_dir, "alembic")
+    if not (os.path.isfile(ini_path) and os.path.isdir(script_dir)):
+        logger.warning("Alembic files not found (%s); falling back to legacy schema path", ini_path)
+        return False
+    try:
+        from alembic import command
+        from alembic.config import Config as AlembicConfig
+        cfg = AlembicConfig(ini_path)
+        cfg.set_main_option("script_location", script_dir)
+        cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+        command.upgrade(cfg, "head")
+        logger.info("Alembic migrations applied (head)")
+        return True
+    except Exception as exc:
+        logger.error("Alembic migration failed: %s — falling back to legacy schema path", exc)
+        return False
 
 
 def ensure_schema_updates() -> None:
     """
     Safely update database schema using SQLAlchemy Inspector.
 
-    DEPRECATED: This function should be replaced with Alembic migrations.
-    TODO: Initialize Alembic and create proper migration scripts.
-
-    Security: Uses SQLAlchemy's Inspector API to avoid SQL injection risks
-    from raw PRAGMA statements.
+    LEGACY FALLBACK ONLY（audit M）：正式路徑已改為 Alembic（run_db_migrations）。
+    僅在 alembic 檔案缺失（如 frozen build 未打包）或 migration 失敗時使用。
+    新的 schema 變更請寫 alembic revision，不要再往這裡加 ALTER。
     """
     try:
         inspector = inspect(engine)
@@ -244,7 +268,10 @@ def apply_ocr_overrides_from_db() -> None:
         logger.warning("apply_ocr_overrides_from_db failed: %s", exc)
 
 
-ensure_schema_updates()
+# Audit M：schema 由 Alembic 管理；alembic 不可用時才退回 legacy 路徑。
+if not run_db_migrations():
+    models.Base.metadata.create_all(bind=engine)
+    ensure_schema_updates()
 ensure_default_admin()
 apply_llm_overrides_from_db()
 apply_ocr_overrides_from_db()
@@ -254,8 +281,61 @@ apply_ocr_overrides_from_db()
 from .services import kg_queue as _kg_queue
 _kg_queue.start_worker()
 
-# Initialize rate limiter
-limiter = Limiter(key_func=get_remote_address)
+
+def recover_stale_tasks() -> None:
+    """Audit C5：程序重啟後，把上次沒跑完的背景任務收尾。
+
+    - kg_extract 是可重跑的 → pending 重新入列、running/processing 也重排。
+    - 其他任務（vectorize/reocr/pdf_analyze…）跑在 FastAPI BackgroundTasks，
+      重啟後無法自動續跑 → 直接標 failed，讓前端 banner 停止轉圈。
+    - 順帶把卡在 processing 的 document.ocr_status 重設為 failed。
+    否則這些任務會永遠停在 pending/running，前端一直顯示進行中。
+    """
+    from .database import SessionLocal
+    from . import models
+    STALE = ("pending", "running", "processing")
+    db = SessionLocal()
+    try:
+        tasks = (
+            db.query(models.BackgroundTask)
+            .filter(models.BackgroundTask.status.in_(STALE))
+            .all()
+        )
+        requeued = failed = 0
+        for task in tasks:
+            if task.task_type == "kg_extract" and task.document_id:
+                task.status = "pending"
+                task.message = "重新排入 KG 佇列（服務重啟復原）"
+                _kg_queue.enqueue(task.id, task.document_id)
+                requeued += 1
+            else:
+                task.status = "failed"
+                task.error = "服務重啟，此背景任務未完成，已標記為失敗，請重新觸發。"
+                failed += 1
+        stuck_docs = (
+            db.query(models.Document)
+            .filter(models.Document.ocr_status == "processing")
+            .all()
+        )
+        for doc in stuck_docs:
+            doc.ocr_status = "failed"
+        db.commit()
+        if tasks or stuck_docs:
+            logger.info(
+                "Stale-task recovery: %d kg re-queued, %d marked failed, %d docs ocr reset",
+                requeued, failed, len(stuck_docs),
+            )
+    except Exception as exc:
+        logger.warning("recover_stale_tasks failed: %s", exc)
+    finally:
+        db.close()
+
+
+recover_stale_tasks()
+
+# Initialize rate limiter (audit M：proxy-aware client IP key)
+from .utils.ratelimit import client_ip_key as _client_ip_key
+limiter = Limiter(key_func=_client_ip_key)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

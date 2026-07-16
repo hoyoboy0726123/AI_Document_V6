@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     LLM_MODEL: str | None = None               # 覆寫 OLLAMA_LLM_MODEL；空則用 provider 預設
     EMBEDDING_PROVIDER: str = "ollama"
     EMBEDDING_MODEL: str | None = None
+    # Audit H1：embedding 前的防護式截斷字元上限。舊版硬編 450（為 bge-large 512-token
+    # 上限而設），但預設 chunk 1800 字 → 只有前 25% 進向量、後段查不到。
+    # 部署的 qwen3-embedding 上下文遠大於此，設 2000 可完整涵蓋 1800 字 chunk。
+    # 若改用 bge-large 等 512-token 模型，請在 .env 把此值調回 ~450。
+    EMBEDDING_MAX_CHARS: int = 2000
     # VL 視覺模型(目前只支援 ollama;Gemini vision 走 LLM_PROVIDER 那條)
     VISION_PROVIDER: str = "ollama"
     VISION_MODEL: str | None = None            # 覆寫 OLLAMA_VISION_MODEL;留空則沿用

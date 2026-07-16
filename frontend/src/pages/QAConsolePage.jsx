@@ -60,16 +60,42 @@ const QAConsolePage = () => {
   const [saveNoteLoading, setSaveNoteLoading] = useState(false);
   const conversationEndRef = useRef(null);
   const abortRef = useRef(null);
+  // Audit H14：鏡射最新的 streamingMsg，讓 onDone 從 ref 讀取最終值，
+  // 不必把 setConversationHistory 塞進 setStreamingMsg 的 updater 內
+  // （那是 React 明文禁止的副作用，StrictMode 下會 double-invoke → 訊息存兩筆、後端也被 PUT 兩次）。
+  const streamingMsgRef = useRef(null);
+
+  // streamingMsgRef 是「同步的真實來源」：每次更新都先「同步」寫入 ref，再 setStreamingMsg 觸發渲染。
+  // 修正 sources 遺失：sources 事件與 done 事件常在同一個 reader tick 連續送達；
+  // 若靠 setState 的 updater 更新 ref，updater 是在 render 階段（非同步）才執行，
+  // onDone 這時讀 ref 仍是舊值 → 參考來源卡片消失、無法點預覽。
+  // 改為在 setStreaming 呼叫當下同步更新 ref（updater 也讀 ref，確保鏈式累積正確）。
+  const setStreaming = (updater) => {
+    const next = typeof updater === "function" ? updater(streamingMsgRef.current) : updater;
+    streamingMsgRef.current = next;
+    setStreamingMsg(next);
+  };
 
   useEffect(() => {
     conversationEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [conversationHistory, streamingMsg?.answer]);
 
+  // Audit H12：元件卸載（切換路由）時中止進行中的串流，
+  // 避免 fetch reader 繼續對已卸載元件 setState（記憶體洩漏）與後端 LLM 空跑。
+  useEffect(() => {
+    return () => {
+      try { abortRef.current?.abort(); } catch { /* ignore */ }
+      abortRef.current = null;
+    };
+  }, []);
+
+  // (ref 由 setStreaming 同步維護，不需再用 effect 從 state 回寫)
+
   const stopInFlight = () => {
     try { abortRef.current?.abort(); } catch { /* ignore */ }
     abortRef.current = null;
     setLoading(false);
-    setStreamingMsg(null);
+    setStreaming(null);
     message.info("已停止查詢");
   };
 
@@ -141,6 +167,7 @@ const QAConsolePage = () => {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let finished = false; // 是否已收到 done/error 事件
 
     while (true) {
       const { done, value } = await reader.read();
@@ -159,11 +186,14 @@ const QAConsolePage = () => {
           if (event.type === "thinking") onThinking?.(event.text || "");
           else if (event.type === "content") onContent?.(event.text || "");
           else if (event.type === "sources") onSources?.(event);
-          else if (event.type === "done") onDone?.();
-          else if (event.type === "error") onError?.(event.message);
+          else if (event.type === "done") { finished = true; onDone?.(); }
+          else if (event.type === "error") { finished = true; onError?.(event.message); }
         } catch { /* ignore */ }
       }
     }
+    // Audit H11：串流結束卻沒收到 done/error（proxy 逾時、後端重啟、generator 提前結束）
+    // → 補呼叫一次 onDone，避免 UI 永遠卡在「進行中」。
+    if (!finished) onDone?.();
   };
 
   // Agent / hybrid mode — SSE stream (default /agent/chat; hybrid uses /agent/route)
@@ -191,6 +221,7 @@ const QAConsolePage = () => {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let finished = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -213,19 +244,21 @@ const QAConsolePage = () => {
         try {
           const data = JSON.parse(dataStr);
           if (eventName === "final") onFinal?.(data);
-          else if (eventName === "done") onDone?.();
-          else if (eventName === "error") onError?.(data.message || "Agent 失敗");
+          else if (eventName === "done") { finished = true; onDone?.(); }
+          else if (eventName === "error") { finished = true; onError?.(data.message || "Agent 失敗"); }
           else onEvent?.(eventName, data);
         } catch {
           // ignore malformed event
         }
       }
     }
+    // Audit H11：串流沒收到 done/error 就結束 → 補呼叫 onDone，避免永久卡「進行中」。
+    if (!finished) onDone?.();
   };
 
   const runAgentStream = async (question) => {
     setLoading(true);
-    setStreamingMsg({
+    setStreaming({
       question,
       thinking: "",
       answer: "",
@@ -244,17 +277,17 @@ const QAConsolePage = () => {
     try {
       await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5 }, {
         onEvent: (eventName, data) => {
-          setStreamingMsg((prev) => prev ? {
+          setStreaming((prev) => prev ? {
             ...prev,
             agentSteps: [...(prev.agentSteps || []), { event: eventName, ...data }],
           } : null);
         },
         onFinal: (data) => {
-          setStreamingMsg((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
+          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
         },
         onDone: () => {
-          setStreamingMsg((prev) => {
-            if (!prev) return null;
+          const prev = streamingMsgRef.current;
+          if (prev) {
             const newMsg = {
               question: prev.question,
               answer: prev.answer,
@@ -269,14 +302,14 @@ const QAConsolePage = () => {
               timestamp: new Date().toISOString(),
             };
             setConversationHistory((h) => [...h, newMsg]);
-            return null;
-          });
+          }
+          setStreaming(null);
           setLoading(false);
           abortRef.current = null;
         },
         onError: (errMsg) => {
           message.error(errMsg || "Agent 查詢失敗");
-          setStreamingMsg(null);
+          setStreaming(null);
           setLoading(false);
           abortRef.current = null;
         },
@@ -284,7 +317,7 @@ const QAConsolePage = () => {
     } catch (err) {
       const msg = err?.message || "Agent 查詢失敗";
       if (/abort|cancel/i.test(String(msg))) message.info("已停止查詢"); else message.error(msg);
-      setStreamingMsg(null);
+      setStreaming(null);
       setLoading(false);
       abortRef.current = null;
     }
@@ -293,7 +326,7 @@ const QAConsolePage = () => {
   // 混合模式 — 打 /agent/route,先收 route 事件(知道被判到哪一邊),再串流 agent 步驟或直接 final
   const runRouteStream = async (question) => {
     setLoading(true);
-    setStreamingMsg({
+    setStreaming({
       question, thinking: "", answer: "", isStreaming: true, thinkingDone: false,
       sources: [], agentMode: true, hybrid: true, routedMode: null, agentSteps: [],
     });
@@ -303,17 +336,17 @@ const QAConsolePage = () => {
         onEvent: (eventName, data) => {
           if (eventName === "route") {
             // rag 子模式不需要顯示「推理過程」面板
-            setStreamingMsg((prev) => prev ? { ...prev, routedMode: data.mode, agentMode: data.mode === "agent" } : null);
+            setStreaming((prev) => prev ? { ...prev, routedMode: data.mode, agentMode: data.mode === "agent" } : null);
             return;
           }
-          setStreamingMsg((prev) => prev ? { ...prev, agentSteps: [...(prev.agentSteps || []), { event: eventName, ...data }] } : null);
+          setStreaming((prev) => prev ? { ...prev, agentSteps: [...(prev.agentSteps || []), { event: eventName, ...data }] } : null);
         },
         onFinal: (data) => {
-          setStreamingMsg((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
+          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
         },
         onDone: () => {
-          setStreamingMsg((prev) => {
-            if (!prev) return null;
+          const prev = streamingMsgRef.current;
+          if (prev) {
             const newMsg = {
               question: prev.question, answer: prev.answer, sources: prev.sources || [],
               is_followup: false, optimized_query: null, thinking: "", suggested_questions: [],
@@ -321,35 +354,35 @@ const QAConsolePage = () => {
               routedMode: prev.routedMode, agentSteps: prev.agentSteps || [], timestamp: new Date().toISOString(),
             };
             setConversationHistory((h) => [...h, newMsg]);
-            return null;
-          });
+          }
+          setStreaming(null);
           setLoading(false);
           abortRef.current = null;
         },
         onError: (errMsg) => {
           message.error(errMsg || "混合查詢失敗");
-          setStreamingMsg(null); setLoading(false); abortRef.current = null;
+          setStreaming(null); setLoading(false); abortRef.current = null;
         },
       }, "/api/v1/agent/route");
     } catch (err) {
       const msg = err?.message || "混合查詢失敗";
       if (/abort|cancel/i.test(String(msg))) message.info("已停止查詢"); else message.error(msg);
-      setStreamingMsg(null); setLoading(false); abortRef.current = null;
+      setStreaming(null); setLoading(false); abortRef.current = null;
     }
   };
 
   const runStream = async (payload, question) => {
     setLoading(true);
-    setStreamingMsg({ question, thinking: "", answer: "", isStreaming: true, thinkingDone: false, sources: [], is_followup: false, optimized_query: null });
+    setStreaming({ question, thinking: "", answer: "", isStreaming: true, thinkingDone: false, sources: [], is_followup: false, optimized_query: null });
 
     try {
       await postRagStream(payload, {
         onThinking: (text) =>
-          setStreamingMsg((prev) => prev ? { ...prev, thinking: prev.thinking + text } : null),
+          setStreaming((prev) => prev ? { ...prev, thinking: prev.thinking + text } : null),
         onContent: (text) =>
-          setStreamingMsg((prev) => prev ? { ...prev, answer: prev.answer + text } : null),
+          setStreaming((prev) => prev ? { ...prev, answer: prev.answer + text } : null),
         onSources: (event) =>
-          setStreamingMsg((prev) =>
+          setStreaming((prev) =>
             prev ? {
               ...prev,
               sources: event.sources ?? [],
@@ -359,8 +392,8 @@ const QAConsolePage = () => {
             } : null
           ),
         onDone: () => {
-          setStreamingMsg((prev) => {
-            if (!prev) return null;
+          const prev = streamingMsgRef.current;
+          if (prev) {
             const newMsg = {
               question: prev.question,
               answer: prev.answer,
@@ -373,14 +406,14 @@ const QAConsolePage = () => {
               timestamp: new Date().toISOString(),
             };
             setConversationHistory((h) => [...h, newMsg]);
-            return null;
-          });
+          }
+          setStreaming(null);
           setLoading(false);
           abortRef.current = null;
         },
         onError: (errMsg) => {
           message.error(errMsg || "串流查詢失敗");
-          setStreamingMsg(null);
+          setStreaming(null);
           setLoading(false);
           abortRef.current = null;
         },
@@ -388,13 +421,16 @@ const QAConsolePage = () => {
     } catch (err) {
       const msg = err?.message || "查詢失敗";
       if (/abort|cancel/i.test(String(msg))) message.info("已停止查詢"); else message.error(msg);
-      setStreamingMsg(null);
+      setStreaming(null);
       setLoading(false);
       abortRef.current = null;
     }
   };
 
   const handleSubmit = async (values) => {
+    // Audit H15：串流進行中禁止再送出，否則第二條 stream 會覆寫 abortRef 與
+    // streamingMsg，兩條 stream 的內容交錯寫進同一個答案、還各存一筆歷史。
+    if (loading) { message.warning("查詢進行中，請稍候或先按停止"); return; }
     const question = values.question?.trim();
     if (!question) { message.warning("請輸入問題"); return; }
     form.setFieldValue("question", "");
@@ -410,7 +446,9 @@ const QAConsolePage = () => {
       project_id: values.project_id || null,
       document_id,
       folder_ids,
-      conversation_history: conversationHistory,
+      // Audit M5：只送 {question, answer}，與追問一致；送整包（含 sources/agentSteps）
+      // 會讓 payload 隨對話暴增，且舊資料缺 answer 時 422。
+      conversation_history: conversationHistory.map((m) => ({ question: m.question, answer: m.answer })),
       use_ai_fallback: false,
       skip_ai_understanding: true,
     };
@@ -423,6 +461,7 @@ const QAConsolePage = () => {
   };
 
   const handleFollowupSubmit = async () => {
+    if (loading) { message.warning("查詢進行中，請稍候或先按停止"); return; }  // audit H15
     const question = followupQuestion?.trim();
     if (!question) { message.warning("請輸入追問內容"); return; }
     setFollowupQuestion("");
@@ -447,6 +486,12 @@ const QAConsolePage = () => {
   };
 
   const clearHistory = () => {
+    // Audit medium：先中止進行中的串流，否則其 onDone 會把新訊息塞回剛清空的畫面。
+    try { abortRef.current?.abort(); } catch { /* ignore */ }
+    abortRef.current = null;
+    setStreaming(null);
+    setLoading(false);
+    setExpandedSnippets({});
     setConversationHistory([]);
     apiClient.delete("rag/conversation").catch(() => {});
     message.success("對話歷史已清除");
@@ -659,9 +704,19 @@ const QAConsolePage = () => {
                   }
                   description={
                     <div>
-                      <Text style={{ whiteSpace: "pre-wrap" }}>
-                        {displaySnippet}{needsTruncate && !isExpanded ? "..." : ""}
-                      </Text>
+                      {(!needsTruncate || isExpanded) ? (
+                        // 完整顯示時：以 Markdown 渲染（表格、清單等），比較美觀
+                        <div className="markdown-content" style={{ fontSize: 13, color: "#595959" }}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                            {full}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        // 收合預覽時：純文字截斷（避免顯示切一半的表格），快速掃視
+                        <Text style={{ whiteSpace: "pre-wrap" }}>
+                          {displaySnippet}...
+                        </Text>
+                      )}
                       {needsTruncate && (
                         <Button
                           type="link"

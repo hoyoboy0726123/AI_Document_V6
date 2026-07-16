@@ -47,6 +47,17 @@ const PdfPreviewModal = ({
   const pdfContainerRef = useRef(null);
   const pendingHighlightKeyword = useRef("");
   const streamControllerRef = useRef(null);
+  const analysisScrollRef = useRef(null); // AI 分析對話捲動容器
+
+  // 分析面板開啟或有新內容時，自動捲到最下方（顯示最新一次查詢/正在生成的結果），
+  // 而不是停在最上方的舊紀錄。
+  useEffect(() => {
+    if (!showAnalysis) return undefined;
+    const el = analysisScrollRef.current;
+    if (!el) return undefined;
+    const t = setTimeout(() => { el.scrollTop = el.scrollHeight; }, 80);
+    return () => clearTimeout(t);
+  }, [conversationHistory, showAnalysis]);
 
   useEffect(() => {
     apiClient.get("/rag/config")
@@ -55,6 +66,13 @@ const PdfPreviewModal = ({
   }, []);
 
   useEffect(() => {
+    // Audit H12：open 切換或換文件時，先中止上一份文件仍在跑的分析串流，
+    // 否則舊 stream 的 updateAnswer 會以舊 msgIndex 繼續寫入 → 舊文件的分析文字
+    // 覆寫/插進新文件的對話，甚至被存成新文件的筆記。
+    try { streamControllerRef.current?.abort(); } catch { /* ignore */ }
+    streamControllerRef.current = null;
+    setAnalyzing(false);
+
     if (open) {
       setPageNumber(initialPage || 1);
       setShowAnalysis(false);
@@ -143,21 +161,43 @@ const PdfPreviewModal = ({
         parent.replaceChild(document.createTextNode(mark.textContent), mark);
       });
 
+      // Audit L 修正：
+      // 1) global regex 重複 test() 會殘留 lastIndex，讓後續節點從中間比對而漏高亮
+      //    → 每次 test 前重設 lastIndex。
+      // 2) 不再用 innerHTML 拼字串（PDF 文字含 < / & 會被當 HTML 解析，且有注入面）
+      //    → 改純 DOM：split + createElement("mark")。
       const escaped = highlightKeyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const regex = new RegExp(escaped, "gi");
 
       const walk = (node) => {
         if (node.nodeType === Node.TEXT_NODE) {
           const text = node.textContent;
-          if (regex.test(text)) {
-            const span = document.createElement("span");
-            span.innerHTML = text.replace(
-              regex,
-              '<mark style="background-color:#ffff00;padding:2px 0;">$&</mark>'
-            );
-            node.parentNode.replaceChild(span, node);
+          regex.lastIndex = 0;
+          if (!regex.test(text)) return;
+          regex.lastIndex = 0;
+
+          const frag = document.createDocumentFragment();
+          let lastEnd = 0;
+          let m;
+          while ((m = regex.exec(text)) !== null) {
+            if (m.index > lastEnd) {
+              frag.appendChild(document.createTextNode(text.slice(lastEnd, m.index)));
+            }
+            const mark = document.createElement("mark");
+            mark.style.backgroundColor = "#ffff00";
+            mark.style.padding = "2px 0";
+            mark.textContent = m[0];
+            frag.appendChild(mark);
+            lastEnd = m.index + m[0].length;
+            if (m[0].length === 0) regex.lastIndex += 1; // 防零長匹配死迴圈
           }
+          if (lastEnd < text.length) {
+            frag.appendChild(document.createTextNode(text.slice(lastEnd)));
+          }
+          node.parentNode.replaceChild(frag, node);
         } else {
+          // 不進入已生成的 <mark>，避免重複包裹（live NodeList 會走訪到新插入的節點）
+          if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "MARK") return;
           node.childNodes.forEach(walk);
         }
       };
@@ -179,6 +219,8 @@ const PdfPreviewModal = ({
 
   const handleLoadSuccess = ({ numPages: total }) => {
     setNumPages(total);
+    // Audit M：來源頁碼可能超過實際頁數（OCR 頁偏移 / 換版）→ 夾在 [1,total]，避免開壞頁白屏。
+    setPageNumber((prev) => Math.min(Math.max(1, prev || 1), total || 1));
     if (pendingHighlightKeyword.current) {
       setTimeout(() => {
         setHighlightKeyword(pendingHighlightKeyword.current);
@@ -280,6 +322,7 @@ const PdfPreviewModal = ({
         });
       };
 
+      let hadError = false;
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
@@ -299,10 +342,17 @@ const PdfPreviewModal = ({
               try { dataObj = JSON.parse(raw); } catch { dataObj = { text: raw }; }
             }
           }
+
+          // Audit H8：後端錯誤走 event:error + {message}，舊版因 text 為空被 continue 掉，
+          // 迴圈結束又無條件顯示「分析完成」→ 使用者看到空答案配成功提示。
+          if (eventType === "error") {
+            hadError = true;
+            message.error(dataObj?.message || "分析失敗");
+            break;
+          }
+
           const text = (dataObj && dataObj.text) || "";
           if (!text) continue;
-
-          console.log(`[Stream Debug] Type: ${eventType}, Text: "${text}"`);
 
           if (eventType === "thinking") {
             updateAnswer(text, true);
@@ -310,9 +360,10 @@ const PdfPreviewModal = ({
             updateAnswer(text, false);
           }
         }
+        if (hadError) break;
       }
 
-      message.success("分析完成");
+      if (!hadError) message.success("分析完成");
     } catch (err) {
       const msg = err?.message || "串流分析失敗";
       message.error(msg);
@@ -533,7 +584,7 @@ const PdfPreviewModal = ({
 
   const fileLoading = (
     <div style={{ padding: 24 }}>
-      <Spin tip="載入 PDF..." />
+      <Spin tip="載入 PDF..."><div style={{ minHeight: 80 }} /></Spin>
     </div>
   );
 
@@ -544,9 +595,9 @@ const PdfPreviewModal = ({
       title={title ? `PDF 預覽 - ${title}` : "PDF 預覽"}
       width="95%"
       style={{ top: 20 }}
-      bodyStyle={{ height: "85vh", overflow: "hidden" }}
+      styles={{ body: { height: "85vh", overflow: "hidden" } }}
       footer={null}
-      destroyOnClose
+      destroyOnHidden
     >
       {fileUrl ? (
         <div style={{ height: "100%", display: "flex", gap: 16 }}>
@@ -707,7 +758,7 @@ const PdfPreviewModal = ({
                 )}
               </div>
 
-              <div style={{ flex: 1, overflow: "auto", marginBottom: 12 }}>
+              <div ref={analysisScrollRef} style={{ flex: 1, overflow: "auto", marginBottom: 12 }}>
                 {conversationHistory.length === 0 ? (
                   <Card size="small">
                     <Typography.Text type="secondary">
@@ -783,7 +834,7 @@ const PdfPreviewModal = ({
         </div>
       ) : (
         <div style={{ textAlign: "center", padding: 40 }}>
-          <Spin tip="載入 PDF..." />
+          <Spin tip="載入 PDF..."><div style={{ minHeight: 80 }} /></Spin>
         </div>
       )}
     </Modal>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Descriptions, Select, Space, Spin, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
+import { Alert, Button, Card, Descriptions, Select, Space, Spin, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
 import { FilePdfOutlined, ExclamationCircleOutlined, EditOutlined, DeleteOutlined, BookOutlined, PlusOutlined, MinusOutlined, DatabaseOutlined, ReloadOutlined, MergeCellsOutlined, ScissorOutlined, TagOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -33,6 +33,9 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
 
   // 高精度重跑 OCR 狀態
   const [reocrLoading, setReocrLoading] = useState(false);
+  // 文件是否正在後端處理（OCR / 向量化重建）+ 進行中的任務（顯示進度、避免重複觸發）
+  const [polling, setPolling] = useState(false);
+  const [ocrTask, setOcrTask] = useState(null);
 
   // 向量塊管理狀態
   const [chunks, setChunks] = useState(null); // null = 未載入
@@ -166,6 +169,47 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentId]);
 
+  // 若文件本身狀態就是 processing（例如重新整理進來時 OCR 還沒跑完）→ 自動開始輪詢
+  useEffect(() => {
+    if (document?.ocr_status === "processing") setPolling(true);
+  }, [document?.ocr_status]);
+
+  // 處理中：每 5 秒輪詢文件狀態與進行中的任務；完成後刷新內容並停止
+  useEffect(() => {
+    if (!polling) return undefined;
+    let cancelled = false;
+    const INFLIGHT = ["reocr", "vectorize", "vl_vectorize", "ocr_vectorize"];
+    const tick = async () => {
+      try {
+        const [tRes, dRes] = await Promise.all([
+          apiClient.get("tasks/"),
+          apiClient.get(`documents/${documentId}`),
+        ]);
+        if (cancelled) return;
+        const t = (tRes.data || []).find(
+          (x) => x.document_id === documentId &&
+            INFLIGHT.includes(x.task_type) &&
+            ["pending", "running", "processing"].includes(x.status)
+        );
+        setOcrTask(t || null);
+        setDocument(dRes.data);
+        if (dRes.data.ocr_status !== "processing" && !t) {
+          setPolling(false);
+          setOcrTask(null);
+          message.success("OCR / 向量化已完成，內容已更新");
+          if (chunks) fetchChunks();
+        }
+      } catch { /* 短暫失敗忽略，下輪再試 */ }
+    };
+    const id = setInterval(tick, 5000);
+    tick();
+    return () => { cancelled = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polling, documentId]);
+
+  // 是否正在後端處理中（processing 狀態或有進行中的任務）
+  const isProcessing = document?.ocr_status === "processing" || polling || !!ocrTask;
+
   // 如果有初始頁面參數（來自搜尋結果），自動開啟 PDF 預覽
   useEffect(() => {
     if (document && initialPage) {
@@ -212,8 +256,11 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
       onOk: async () => {
         try {
           setReocrLoading(true);
-          await apiClient.post(`documents/${documentId}/reocr`, { engine: 'rapid', tier: 'server' });
-          message.success('已開始高精度重跑 OCR（背景執行），完成後請重新整理');
+          const resp = await apiClient.post(`documents/${documentId}/reocr`, { engine: 'rapid', tier: 'server' });
+          // 後端同文件去重：若已有進行中任務會回傳既有任務，前端一律開始輪詢進度
+          setOcrTask(resp.data || null);
+          setPolling(true);
+          message.success('已開始高精度重跑 OCR，下方會顯示進度（背景執行，可離開此頁）');
         } catch (error) {
           message.error(error.response?.data?.detail ?? '重跑 OCR 失敗');
         } finally {
@@ -387,9 +434,14 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
       title="文件詳情"
       extra={
         <Space>
+          {isProcessing && (
+            <Tag icon={<Spin size="small" style={{ marginRight: 4 }} />} color="processing">
+              {ocrTask?.task_type === "reocr" ? "OCR 重跑中…" : "處理中…"}
+            </Tag>
+          )}
           <Button
             onClick={handleReVectorize}
-            disabled={!document || reVectorizing}
+            disabled={!document || reVectorizing || isProcessing}
             loading={reVectorizing}
             type="default"
           >
@@ -397,7 +449,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
           </Button>
           <Button
             onClick={handleReocr}
-            disabled={!document || reocrLoading}
+            disabled={!document || reocrLoading || isProcessing}
             loading={reocrLoading}
             type="default"
           >
@@ -412,6 +464,16 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
     >
       {document && (
         <>
+        {isProcessing && (
+          <Alert
+            type="info"
+            showIcon
+            icon={<Spin size="small" />}
+            style={{ marginBottom: 16 }}
+            message="文件處理中（OCR / 向量化重建）"
+            description="server 等級 OCR 在 CPU 上較慢（每頁約 1 分鐘），背景執行中。完成後此頁會自動更新，你可以先離開這一頁。處理期間「高精度重跑 OCR / 重新向量化」已暫時停用，避免重複觸發。"
+          />
+        )}
         <Tabs
           defaultActiveKey="info"
           onChange={(key) => { if (key === "chunks" && !chunks) fetchChunks(); }}
@@ -541,7 +603,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                       cursor: 'pointer'
                     }}
                     headStyle={{ borderBottom: 'none', padding: '20px 20px 0 20px', minHeight: 48 }}
-                    bodyStyle={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', padding: '12px 20px 20px 20px' }}
+                    styles={{ body: { flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', padding: '12px 20px 20px 20px' } }}
                     hoverable
                     onClick={() => setViewingNote(note)}
                   >
@@ -964,7 +1026,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
             style={{ top: 20 }}
             styles={{ body: { height: "80vh", overflow: "hidden", display: "flex", flexDirection: "column", padding: "12px 16px" } }}
             footer={null}
-            destroyOnClose
+            destroyOnHidden
           >
             <Space style={{ marginBottom: 8 }}>
               <Button icon={<MinusOutlined />} size="small" onClick={() => setQuickScale((s) => Math.max(0.5, parseFloat((s - 0.15).toFixed(2))))} />

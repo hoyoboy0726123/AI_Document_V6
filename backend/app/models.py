@@ -1,7 +1,7 @@
 import uuid
 from typing import List, Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -219,7 +219,9 @@ class DocumentChunk(BaseMixin, Base):
     paragraph_index: Mapped[Optional[int]] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[List[float]] = mapped_column(MutableList.as_mutable(JSON), default=list, nullable=False)
-    faiss_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    # BigInteger: faiss_id 是 uuid4 % 2^63，SQLite 沒事但 PostgreSQL 的 INTEGER 是 32-bit
+    # 會 NumericValueOutOfRange（audit H6）。BigInteger 在 SQLite 仍映射為 INTEGER，相容。
+    faiss_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
 
     document: Mapped[Document] = relationship("Document", back_populates="chunks")
 

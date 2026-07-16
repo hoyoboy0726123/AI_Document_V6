@@ -126,6 +126,12 @@ const DocumentList = ({ onView }) => {
   const [movingDoc, setMovingDoc] = useState(null);
   const [movingTargetFolderId, setMovingTargetFolderId] = useState(null);
 
+  // 多選批次操作（分類 / 移到資料夾 / 刪除）
+  const [selectedRowKeys, setSelectedRowKeys] = useState([]);
+  const [bulkClassifyId, setBulkClassifyId] = useState(undefined);
+  const [bulkFolderId, setBulkFolderId] = useState(undefined);
+  const [bulkLoading, setBulkLoading] = useState(false);
+
   // PDF 預覽狀態
   const [pdfPreviewVisible, setPdfPreviewVisible] = useState(false);
   const [previewDocumentId, setPreviewDocumentId] = useState(null);
@@ -412,6 +418,38 @@ const DocumentList = ({ onView }) => {
     }
   };
 
+  // ── 批次操作（對 selectedRowKeys 逐一呼叫既有單筆端點）──────────────────
+  const runBulk = async (fn, verb) => {
+    const ids = [...selectedRowKeys];
+    if (ids.length === 0) return;
+    setBulkLoading(true);
+    const results = await Promise.allSettled(ids.map(fn));
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    const fail = ids.length - ok;
+    setBulkLoading(false);
+    if (fail === 0) message.success(`已${verb} ${ok} 份文件`);
+    else message.warning(`${verb}完成：成功 ${ok} 份、失敗 ${fail} 份`);
+    setSelectedRowKeys([]);
+    fetchDocuments();
+  };
+
+  const handleBulkDelete = () =>
+    runBulk((id) => apiClient.delete(`documents/${id}`), '刪除');
+
+  const handleBulkClassify = () => {
+    const cid = bulkClassifyId;
+    if (!cid) return;
+    setBulkClassifyId(undefined);
+    runBulk((id) => apiClient.put(`documents/${id}`, { classification_id: cid }), '套用分類至');
+  };
+
+  const handleBulkMove = () => {
+    if (bulkFolderId === undefined) return;
+    const fid = bulkFolderId || '__unset__';
+    setBulkFolderId(undefined);
+    runBulk((id) => apiClient.put(`documents/${id}`, { folder_id: fid }), '移動');
+  };
+
   const handleDownload = async (record) => {
     try {
       const response = await apiClient.get(`documents/${record.id}/pdf`, {
@@ -618,7 +656,7 @@ const DocumentList = ({ onView }) => {
           size="small"
           title={`搜尋結果 (${searchResults.length} 筆)`}
           style={{ marginBottom: 16 }}
-          bodyStyle={{ maxHeight: '300px', overflowY: 'auto' }}
+          styles={{ body: { maxHeight: '300px', overflowY: 'auto' } }}
         >
           <List
             size="small"
@@ -681,11 +719,68 @@ const DocumentList = ({ onView }) => {
         </Form.Item>
       </Form>
 
+      {selectedRowKeys.length > 0 && (
+        <Space
+          wrap
+          style={{ marginBottom: 12, padding: '8px 12px', background: '#eef5ff', border: '1px solid #cfe0ff', borderRadius: 6 }}
+        >
+          <Typography.Text strong>已選 {selectedRowKeys.length} 項</Typography.Text>
+          <Divider type="vertical" />
+          <Select
+            placeholder="選擇分類"
+            style={{ width: 180 }}
+            value={bulkClassifyId}
+            onChange={setBulkClassifyId}
+            options={classifications.map((c) => ({ label: c.name, value: c.id }))}
+            showSearch
+            optionFilterProp="label"
+            allowClear
+          />
+          <Button onClick={handleBulkClassify} disabled={!bulkClassifyId} loading={bulkLoading}>
+            套用分類
+          </Button>
+          <Divider type="vertical" />
+          <Select
+            placeholder="移到資料夾"
+            style={{ width: 180 }}
+            value={bulkFolderId}
+            onChange={setBulkFolderId}
+            options={folders.map((f) => ({ label: f.name, value: f.id }))}
+            showSearch
+            optionFilterProp="label"
+            allowClear
+          />
+          <Button onClick={handleBulkMove} disabled={bulkFolderId === undefined} loading={bulkLoading}>
+            移動
+          </Button>
+          <Divider type="vertical" />
+          <Popconfirm
+            title="批次刪除"
+            description={`確定刪除選取的 ${selectedRowKeys.length} 份文件？將一併刪除向量與 PDF 檔案，無法復原。`}
+            okText="刪除"
+            okType="danger"
+            cancelText="取消"
+            onConfirm={handleBulkDelete}
+          >
+            <Button danger icon={<DeleteOutlined />} loading={bulkLoading}>
+              批次刪除
+            </Button>
+          </Popconfirm>
+          <Button type="text" onClick={() => setSelectedRowKeys([])}>
+            取消選取
+          </Button>
+        </Space>
+      )}
+
       <Table
         rowKey="id"
         dataSource={documents}
         columns={columns}
         loading={loading}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys),
+        }}
         pagination={{
           current: page,
           pageSize,

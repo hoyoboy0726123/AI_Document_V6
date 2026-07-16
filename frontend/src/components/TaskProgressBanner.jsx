@@ -51,7 +51,7 @@ const TaskProgressBanner = () => {
             key={entry.task_id}
             size="small"
             style={{ boxShadow: "0 4px 12px rgba(0,0,0,0.15)", borderRadius: 8 }}
-            bodyStyle={{ padding: "10px 14px" }}
+            styles={{ body: { padding: "10px 14px" } }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
               <Space size={6}>

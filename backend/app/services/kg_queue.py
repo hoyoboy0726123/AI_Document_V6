@@ -26,17 +26,37 @@ _worker: "threading.Thread | None" = None
 _lock = threading.Lock()
 
 
+def _mark_task_failed(task_id: str, message: str) -> None:
+    """Best-effort：把卡住的任務標成 failed，避免前端永遠轉圈（audit medium）。"""
+    try:
+        from ..database import SessionLocal
+        from .. import models
+        db = SessionLocal()
+        try:
+            task = db.query(models.BackgroundTask).filter(models.BackgroundTask.id == task_id).first()
+            if task and task.status in ("pending", "running", "processing"):
+                task.status = "failed"
+                task.error = (message or "")[:2000]
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("KG worker: failed to mark task %s as failed", task_id)
+
+
 def _run() -> None:
-    # imported lazily to avoid a circular import at module load
-    from . import kg_pipeline
     while True:
         task_id, document_id = _q.get()
         try:
+            # 延遲 import 放進迴圈並包 try：即使 kg_pipeline import 失敗（如打包環境缺
+            # hiddenimport），worker 也不會整條死掉（audit medium：無聲重啟迴圈）。
+            from . import kg_pipeline
             logger.info("KG worker: start doc=%s (remaining in queue=%d)", document_id, _q.qsize())
             kg_pipeline.run_kg_extract_task(task_id, document_id)
             logger.info("KG worker: done doc=%s", document_id)
-        except Exception:
+        except Exception as exc:
             logger.exception("KG worker: extraction failed for doc=%s", document_id)
+            _mark_task_failed(task_id, f"KG extraction failed: {exc}")
         finally:
             _q.task_done()
 

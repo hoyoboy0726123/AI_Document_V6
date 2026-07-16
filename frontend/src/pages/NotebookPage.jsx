@@ -197,7 +197,7 @@ const NotebookPage = () => {
                     cursor: "pointer",
                   }}
                   headStyle={{ borderBottom: "none", padding: "20px 20px 0 20px", minHeight: 48 }}
-                  bodyStyle={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", padding: "12px 20px 20px 20px" }}
+                  styles={{ body: { flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", padding: "12px 20px 20px 20px" } }}
                   hoverable
                   onClick={() => setViewingNote(note)}
                 >

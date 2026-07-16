@@ -492,7 +492,7 @@ const AdminPage = () => {
         open={fieldModalVisible}
         onCancel={() => setFieldModalVisible(false)}
         onOk={handleFieldSubmit}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form layout="vertical" form={fieldForm}>
           <Form.Item
@@ -538,7 +538,7 @@ const AdminPage = () => {
         open={optionModalVisible}
         onCancel={() => setOptionModalVisible(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
         width={640}
       >
         {currentField && (
@@ -608,7 +608,7 @@ const AdminPage = () => {
         open={Boolean(editingOption)}
         onCancel={() => setEditingOption(null)}
         onOk={handleSubmitOptionEdit}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form layout="vertical" form={optionEditForm}>
           <Form.Item

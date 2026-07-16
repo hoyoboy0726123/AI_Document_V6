@@ -77,11 +77,14 @@ _SPEC_PATTERNS: List[Tuple[str, re.Pattern]] = [
             re.IGNORECASE,
         ),
     ),
-    # IEEE 802.11 / IEEE 1156
+    # IEEE 802.11b / IEEE 802.1Q / IEEE 1156
+    # Audit H9：捕捉群補上可選字母後綴 [A-Za-z]{0,2}。舊 pattern 的結尾 \b 在
+    # "802.11b" 的 "11" 與 "b" 之間比對失敗 → 回溯只抓到 "IEEE 802"，使 802.11b /
+    # 802.1Q / 802.3 全部塌陷成同一個 "IEEE 802" 實體，關係邊掛錯節點。
     (
         "IEEE",
         re.compile(
-            r"\bIEEE\s+(\d{1,4}(?:\.\d{1,3})?)\b",
+            r"\bIEEE\s+(\d{1,4}(?:\.\d{1,3})?[A-Za-z]{0,2})\b",
             re.IGNORECASE,
         ),
     ),

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ... import models, schemas
-from ...core.security import get_current_user
+from ...core.security import get_current_user, get_current_admin_user
 from ...database import get_db
 
 router = APIRouter()
@@ -70,7 +70,7 @@ def list_folders(
 def create_folder(
     payload: schemas.FolderCreate,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：資料夾為全域共用，寫入須 admin
 ):
     _ = current_user
     if payload.parent_id:
@@ -96,7 +96,7 @@ def update_folder(
     folder_id: str,
     payload: schemas.FolderUpdate,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：資料夾為全域共用，寫入須 admin
 ):
     _ = current_user
     folder = _get_folder_or_404(db, folder_id)
@@ -127,7 +127,7 @@ def update_folder(
 def delete_folder(
     folder_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：刪資料夾會影響全體，須 admin
 ):
     _ = current_user
     folder = _get_folder_or_404(db, folder_id)

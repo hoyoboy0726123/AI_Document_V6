@@ -38,6 +38,28 @@ def _doc_service(db: Session) -> DocumentService:
     return DocumentService(db)
 
 
+# 會「重建該文件 chunks / 向量」的任務類型 —— 同一文件同時只允許一個在跑
+_DOC_MUTATING_TASKS = ("reocr", "vectorize", "vl_vectorize", "ocr_vectorize")
+
+
+def _inflight_doc_task(db: Session, document_id: str):
+    """回傳該文件目前 pending/running 的重跑/向量化任務（沒有則 None）。
+
+    用來做「同文件去重」：避免使用者重複點擊「高精度重跑 OCR / 重新向量化」
+    產生多個並行任務互相衝突（重複 chunk / FAISS 孤兒）。
+    """
+    return (
+        db.query(models.BackgroundTask)
+        .filter(
+            models.BackgroundTask.document_id == document_id,
+            models.BackgroundTask.task_type.in_(_DOC_MUTATING_TASKS),
+            models.BackgroundTask.status.in_(("pending", "running", "processing")),
+        )
+        .order_by(models.BackgroundTask.created_at.desc())
+        .first()
+    )
+
+
 def _metadata_service(db: Session) -> MetadataService:
     return MetadataService(db)
 
@@ -771,6 +793,10 @@ async def upload_pdf_async(
     current_user=Depends(get_current_user),
 ):
     """非同步上傳 PDF：立刻返回 task_id，文字提取與 AI 分析在背景執行"""
+    # Audit M：上傳觸發 OCR/AI 分析等重運算 → 每人配額
+    from ...utils.ratelimit import check_quota
+    check_quota(current_user.id, "upload_async", limit=60, per_seconds=3600)
+
     if file.content_type not in {"application/pdf", "application/octet-stream"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files are supported")
 
@@ -1004,6 +1030,14 @@ def re_vectorize_document(
     doc_service = _doc_service(db)
     document = _get_document_or_404(doc_service, document_id)
 
+    # Audit：同文件去重 —— 若已有進行中的重跑 OCR / 向量化任務,拒絕以免並行衝突。
+    inflight = _inflight_doc_task(db, document.id)
+    if inflight is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="此文件正在處理中（OCR / 向量化），請待完成後再操作。",
+        )
+
     try:
         # 只重新生成 embeddings，不重新提取 PDF 文字
         doc_service._re_embed_existing_chunks(document)
@@ -1067,6 +1101,12 @@ def reocr_document(
     document = _get_document_or_404(doc_service, document_id)
     if not document.pdf_path or not Path(document.pdf_path).exists():
         raise HTTPException(status_code=400, detail="此文件沒有可重跑的原始 PDF")
+
+    # Audit：同文件去重 —— 避免使用者重複點擊產生多個並行重跑（會互相打架、造成
+    # 重複 chunk / FAISS 孤兒）。已有進行中的重跑/向量化任務就回傳既有任務,不新建。
+    existing = _inflight_doc_task(db, document.id)
+    if existing is not None:
+        return schemas.TaskRead.model_validate(existing)
 
     bg_task = models.BackgroundTask(
         task_type="reocr",
@@ -1375,7 +1415,7 @@ def create_document_chunk(
     document_id: str,
     payload: schemas.ChunkCreate,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：chunk 寫入=改寫檢索語料，須 admin
 ):
     from ...services import vector_store
     doc_service = _doc_service(db)
@@ -1419,7 +1459,7 @@ def update_document_chunk(
     chunk_id: str,
     payload: schemas.ChunkUpdate,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：chunk 寫入=改寫檢索語料，須 admin
 ):
     from ...services import vector_store
     chunk = _get_chunk_or_404(db, document_id, chunk_id)
@@ -1449,7 +1489,7 @@ def delete_document_chunk(
     document_id: str,
     chunk_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：chunk 寫入=改寫檢索語料，須 admin
 ):
     from ...services import vector_store
     chunk = _get_chunk_or_404(db, document_id, chunk_id)
@@ -1464,7 +1504,7 @@ def merge_document_chunks(
     document_id: str,
     payload: schemas.ChunkMergeRequest,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：chunk 寫入=改寫檢索語料，須 admin
 ):
     """合併多個 chunk 成一個，依照 chunk_index 順序合併文字。"""
     from ...services import vector_store
@@ -1524,7 +1564,7 @@ def split_document_chunk(
     chunk_id: str,
     payload: schemas.ChunkSplitRequest,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),  # audit：chunk 寫入=改寫檢索語料，須 admin
 ):
     """在指定字元位置將一個 chunk 拆成兩個。"""
     from ...services import vector_store

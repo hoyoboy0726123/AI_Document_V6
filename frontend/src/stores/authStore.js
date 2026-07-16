@@ -1,4 +1,4 @@
-import create from 'zustand';
+import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 const useAuthStore = create(
@@ -42,13 +42,20 @@ const useAuthStore = create(
       /**
        * Logout and clear all authentication data
        */
-      logout: () => set({
-        token: null,
-        refreshToken: null,
-        tokenExpiresAt: null,
-        user: null,
-        isAuthenticated: false
-      }),
+      logout: () => {
+        // Audit medium：登出時一併清掉可能殘留的背景任務等本機狀態，
+        // 避免共用電腦換帳號後看到前一位使用者的任務/設定殘影。
+        try {
+          window.localStorage.removeItem('activeTasks');
+        } catch { /* ignore */ }
+        set({
+          token: null,
+          refreshToken: null,
+          tokenExpiresAt: null,
+          user: null,
+          isAuthenticated: false,
+        });
+      },
 
       /**
        * Check if access token is expired or will expire soon

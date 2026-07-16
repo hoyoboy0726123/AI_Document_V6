@@ -284,6 +284,10 @@ async def analyze_pdf_pages(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    # Audit M：VL 多頁分析是最重的 LLM 呼叫之一 → 每人配額
+    from ...utils.ratelimit import check_quota
+    check_quota(current_user.id, "vl_analyze", limit=30, per_seconds=3600)
+
     document = db.query(models.Document).filter(models.Document.id == payload.document_id).first()
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
@@ -334,6 +338,10 @@ def analyze_pdf_pages_stream(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    # Audit M：與非串流版共用同一配額 key
+    from ...utils.ratelimit import check_quota
+    check_quota(current_user.id, "vl_analyze", limit=30, per_seconds=3600)
+
     document = db.query(models.Document).filter(models.Document.id == payload.document_id).first()
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")

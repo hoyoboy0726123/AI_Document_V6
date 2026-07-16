@@ -195,16 +195,32 @@ def split_segments_into_chunks(
     current_paragraph: Optional[int] = None
     chunk_index = 0
 
+    # Audit H1（第二半）：先把「單一超過 max_chars 的 segment」沿句界切開，
+    # 句界也切不動的（如整塊無標點的表格 markdown）再硬切，確保沒有任何 chunk
+    # 遠超 max_chars（否則後段內容會被 embedding 截斷、永遠查不到）。
+    exploded: List[Tuple[str, Optional[int], Optional[int]]] = []
     for segment in segments:
         if isinstance(segment, dict):
-            segment_text = segment.get("text", "").strip()
+            seg_text = (segment.get("text") or "").strip()
             seg_page = segment.get("page")
             seg_para = segment.get("paragraph_index")
         else:
-            segment_text = segment.text.strip()
+            seg_text = (segment.text or "").strip()
             seg_page = segment.page
             seg_para = segment.paragraph_index
+        if not seg_text:
+            continue
+        if len(seg_text) <= max_chars:
+            exploded.append((seg_text, seg_page, seg_para))
+            continue
+        for piece in _split_long_paragraph(seg_text, max_chars):
+            if len(piece) <= max_chars:
+                exploded.append((piece, seg_page, seg_para))
+            else:
+                for i in range(0, len(piece), max_chars):
+                    exploded.append((piece[i:i + max_chars], seg_page, seg_para))
 
+    for segment_text, seg_page, seg_para in exploded:
         if not segment_text:
             continue
 

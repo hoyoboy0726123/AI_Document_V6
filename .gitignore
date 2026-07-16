@@ -6,13 +6,17 @@ frontend/.env*
 
 # Backend / Python
 backend/venv/
+backend/.venv/
+.venv/
+venv/
 backend/**/__pycache__/
+__pycache__/
 backend/**/*.pyc
 backend/logs/
 backend/doc_management.db
-backend/storage/faiss_index.bin
-backend/storage/documents/
-backend/storage/tmp/
+backend/doc_management.db-shm
+backend/doc_management.db-wal
+backend/storage/
 backend/.env
 
 # Common
@@ -39,4 +43,6 @@ backend/frontend_dist/
 TODOS.md
 .lint*.txt
 .lint*.json
+.shots/
+_deckpreview/
 

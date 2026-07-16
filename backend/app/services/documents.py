@@ -1,3 +1,4 @@
+import logging
 import shutil
 import uuid
 from datetime import datetime
@@ -13,6 +14,8 @@ from . import ai, vector_store
 from .ocr_pipeline import extract_image_pdf_blocks
 from .pdf_processing import extract_text_and_segments, split_segments_into_chunks
 from .system_config import SystemConfigService
+
+logger = logging.getLogger(__name__)
 
 
 def _generate_faiss_id() -> int:
@@ -219,35 +222,74 @@ class DocumentService:
         return document
 
     def delete(self, document: models.Document) -> None:
-        """刪除文件及其相關資料（chunks、向量、PDF 檔案）"""
-        # 1. 刪除向量存儲中的 embeddings
+        """刪除文件及其相關資料（chunks、向量、KG、PDF 檔案）
+
+        順序修正（audit C3/H5）：先把 DB 端（KG 邊 / user analysis / chunks / document）
+        全部 commit 成功，再刪 FAISS 向量，最後才刪 PDF 檔。
+        這樣即使 FAISS 刪除或檔案刪除失敗，也不會出現「DB 有 chunk 但向量已消失」
+        或「刪一半 rollback」的單邊不一致；FAISS 殘留向量會在檢索時被 chunk_map 過濾掉。
+        """
+        document_id = document.id
         existing_chunks = (
             self.db.query(models.DocumentChunk)
-            .filter(models.DocumentChunk.document_id == document.id)
+            .filter(models.DocumentChunk.document_id == document_id)
             .all()
         )
         existing_faiss_ids = [chunk.faiss_id for chunk in existing_chunks if chunk.faiss_id]
-        if existing_faiss_ids:
-            vector_store.remove_embeddings(existing_faiss_ids)
+        pdf_path = document.pdf_path
 
-        # 2. 刪除資料庫中的 chunks
+        # 1. 先清 KG（關係邊 + 本文件專屬的 document/section 結構節點），避免懸空邊與幽靈節點
+        try:
+            from . import kg_service
+            kg_service.delete_kg_for_document(self.db, document_id)
+        except Exception as e:  # KG 清理失敗不應阻擋刪除，但要留痕
+            logger.warning(f"KG cleanup failed for document {document_id}: {e}")
+
+        # 2. 清該文件的 per-user 分析狀態（避免懸空 document_id）
+        try:
+            self.db.query(models.DocumentUserAnalysis).filter(
+                models.DocumentUserAnalysis.document_id == document_id
+            ).delete(synchronize_session=False)
+        except Exception as e:
+            logger.warning(f"User-analysis cleanup failed for document {document_id}: {e}")
+
+        # 3. 把指向此文件的背景任務 document_id 置 NULL（保留任務歷史，避免 FK 違規）
+        try:
+            self.db.query(models.BackgroundTask).filter(
+                models.BackgroundTask.document_id == document_id
+            ).update({models.BackgroundTask.document_id: None}, synchronize_session=False)
+        except Exception as e:
+            logger.warning(f"BackgroundTask detach failed for document {document_id}: {e}")
+
+        # 3b. 清該文件的使用者筆記（document_id 為 NOT NULL，無法置 NULL）
+        try:
+            self.db.query(models.DocumentNote).filter(
+                models.DocumentNote.document_id == document_id
+            ).delete(synchronize_session=False)
+        except Exception as e:
+            logger.warning(f"DocumentNote cleanup failed for document {document_id}: {e}")
+
+        # 4. 刪 chunks 與 document 本體，一次 commit（DB 先落地）
         self.db.query(models.DocumentChunk).filter(
-            models.DocumentChunk.document_id == document.id
-        ).delete()
-
-        # 3. 刪除 PDF 檔案（使用安全的路徑驗證）
-        if document.pdf_path:
-            from ..utils.security import safe_file_delete
-            from ..core.config import settings
-            try:
-                safe_file_delete(document.pdf_path, settings.FILE_STORAGE_DIR)
-            except Exception as e:
-                # Log error but don't fail deletion if file removal fails
-                logger.warning(f"Failed to delete PDF file {document.pdf_path}: {e}")
-
-        # 4. 刪除文件記錄
+            models.DocumentChunk.document_id == document_id
+        ).delete(synchronize_session=False)
         self.db.delete(document)
         self.db.commit()
+
+        # 5. DB 成功後才刪 FAISS 向量（失敗只是殘留，會被檢索過濾，不影響正確性）
+        if existing_faiss_ids:
+            try:
+                vector_store.remove_embeddings(existing_faiss_ids)
+            except Exception as e:
+                logger.warning(f"FAISS removal failed for document {document_id}: {e}")
+
+        # 6. 最後刪 PDF 檔案（使用安全的路徑驗證）
+        if pdf_path:
+            from ..utils.security import safe_file_delete
+            try:
+                safe_file_delete(pdf_path, settings.FILE_STORAGE_DIR)
+            except Exception as e:
+                logger.warning(f"Failed to delete PDF file {pdf_path}: {e}")
 
     # ---- ???? ----
     def _metadata_match(self, metadata: Dict[str, Any], filters: Dict[str, Any]) -> bool:
@@ -270,16 +312,30 @@ class DocumentService:
         return True
 
     def _resolve_temp_pdf(self, pdf_temp_path: str) -> Path:
-        candidate = Path(pdf_temp_path)
-        if candidate.exists():
-            return candidate
-        alt = self._pdf_temp / candidate.name
-        if alt.exists():
-            return alt
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Temporary PDF file not found or already removed",
-        )
+        """把呼叫端傳入的暫存路徑安全解析成「暫存目錄內的 .pdf」。
+
+        Audit C2：舊版只檢查 candidate.exists()，任何絕對路徑（.env / DB / 系統檔）
+        都會被接受並被 shutil.move 搬進可下載目錄 → 任意檔案外洩 / 破壞。
+        修法：只取檔名、強制以暫存目錄重組，並用 validate_file_path 再確認路徑
+        確實落在暫存目錄內、且副檔名為 .pdf。
+        """
+        from ..utils.security import validate_file_path
+
+        name = Path(pdf_temp_path).name  # 丟棄任何目錄成分（含 ../）
+        if not name or not name.lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only .pdf temporary files are allowed",
+            )
+        candidate = self._pdf_temp / name
+        try:
+            return validate_file_path(candidate, self._pdf_temp, check_exists=True)
+        except HTTPException as exc:
+            # 統一成 400，避免洩漏是路徑不合法還是檔案不存在
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Temporary PDF file not found or already removed",
+            ) from exc
 
     def _finalize_pdf_and_index(
         self,
@@ -326,16 +382,16 @@ class DocumentService:
         ocr_engine: Optional[str] = None,
         ocr_tier: Optional[str] = None,
     ) -> None:
+        # Audit C4：「先建後換」。舊版在這裡就先刪掉舊 chunks+向量並 commit，之後任一步
+        # （OCR/VL/embedding）失敗，文件就變 0 chunks 且原文不可得（永久資料遺失）。
+        # 改為：只「記住」舊 chunks 的 faiss_id，等新內容 extract + embed 成功後，
+        # 才在同一交易內刪舊、加新（見下方 swap 區塊）。extract 失敗時舊資料完好無損。
         existing_chunks = (
             self.db.query(models.DocumentChunk)
             .filter(models.DocumentChunk.document_id == document.id)
             .all()
         )
-        existing_faiss_ids = [chunk.faiss_id for chunk in existing_chunks]
-        if existing_faiss_ids:
-            vector_store.remove_embeddings(existing_faiss_ids)
-            self.db.query(models.DocumentChunk).filter(models.DocumentChunk.document_id == document.id).delete()
-            self.db.commit()
+        old_faiss_ids = [chunk.faiss_id for chunk in existing_chunks if chunk.faiss_id]
 
         # 強制 OCR 時即使是文字型 PDF 也走 PaddleOCR；忽略前端傳來的 segments
         if force_ocr:
@@ -422,36 +478,46 @@ class DocumentService:
                 }
             ]
 
-        chunk_models: List[models.DocumentChunk] = []
-        for payload in chunk_payloads:
+        # Audit H4：先算 embedding 成功，才把 chunks 寫進 DB。
+        # 舊版先 commit 空 embedding 的 chunks 再 embed，embed 失敗就留下
+        # 「DB 有文字、FAISS 無向量」的半成品文件（向量檢索永遠找不到、還被 BM25 索引）。
+        specs = [(payload, _generate_faiss_id()) for payload in chunk_payloads]
+        if not specs:
+            self.db.commit()
+            self.db.refresh(document, attribute_names=["chunks"])
+            return
+
+        embeddings = ai.embed_texts([payload["text"] for payload, _ in specs])
+        if len(embeddings) != len(specs):
+            raise RuntimeError("Embedding count does not match chunk count")
+
+        # Audit C4 swap：到這裡 extract + embed 都已成功，現在才刪舊 chunks、加新 chunks，
+        # 兩者在同一交易內一次 commit（DB 原子替換）。前面任何一步失敗都不會走到這裡，
+        # 舊資料因此完好保留 —— 不再有「先刪後建，中途失敗 → 內容永久消失」。
+        if existing_chunks:
+            self.db.query(models.DocumentChunk).filter(
+                models.DocumentChunk.document_id == document.id
+            ).delete(synchronize_session=False)
+
+        faiss_mapping: Dict[int, List[float]] = {}
+        for (payload, faiss_id), embedding in zip(specs, embeddings):
             chunk = models.DocumentChunk(
                 document_id=document.id,
                 chunk_index=payload["chunk_index"],
                 page=payload.get("page"),
                 paragraph_index=payload.get("paragraph_index"),
                 text=payload["text"],
-                embedding=[],
-                faiss_id=_generate_faiss_id(),
+                embedding=embedding,
+                faiss_id=faiss_id,
             )
             self.db.add(chunk)
-            chunk_models.append(chunk)
+            faiss_mapping[faiss_id] = embedding
 
+        # DB 先落地（刪舊+加新 一次 commit），成功後才動 FAISS：先移除舊向量、再加入新向量。
         self.db.commit()
         self.db.refresh(document, attribute_names=["chunks"])
-
-        if not chunk_models:
-            return
-
-        embeddings = ai.embed_texts([chunk.text for chunk in chunk_models])
-        if len(embeddings) != len(chunk_models):
-            raise RuntimeError("Embedding count does not match chunk count")
-
-        faiss_mapping: Dict[int, List[float]] = {}
-        for chunk, embedding in zip(chunk_models, embeddings):
-            chunk.embedding = embedding
-            faiss_mapping[chunk.faiss_id] = embedding
-        self.db.commit()
-
+        if old_faiss_ids:
+            vector_store.remove_embeddings(old_faiss_ids)
         vector_store.add_embeddings(faiss_mapping)
 
     def _re_embed_existing_chunks(self, document: models.Document) -> None:

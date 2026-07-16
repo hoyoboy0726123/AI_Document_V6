@@ -7,7 +7,9 @@ const { Header } = Layout;
 const { Title, Text } = Typography;
 
 const AppHeader = () => {
-  const { user, logout } = useAuthStore();
+  // Audit L：細粒度 selector，避免 token refresh 觸發 header re-render
+  const user = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
   const location = useLocation();
 
   const pageTitle = useMemo(() => {

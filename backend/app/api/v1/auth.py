@@ -4,7 +4,6 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import timedelta
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from ... import models, schemas
 from ...database import get_db
@@ -13,14 +12,23 @@ from ...core.security import (
     create_refresh_token,
     verify_refresh_token,
     revoke_refresh_token,
+    rotate_refresh_token,
     revoke_all_user_tokens,
     get_current_user
 )
 from ...core.config import settings
 from ...services import users as user_service
+from ...utils.ratelimit import (
+    client_ip_key,
+    check_login_allowed,
+    record_login_failure,
+    reset_login_failures,
+)
 
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
+# Audit M：key_func 改用 client_ip_key —— 直接對端為 loopback（受信任本機代理）時
+# 採信 X-Forwarded-For 首個 IP，否則用 socket 對端；避免 proxy 後全員共用同一桶。
+limiter = Limiter(key_func=client_ip_key)
 
 
 @router.post("/login", response_model=schemas.TokenWithRefresh)
@@ -47,13 +55,19 @@ def login_for_access_token(
         3. When access_token expires, use refresh_token to get a new one via /auth/refresh
         4. When refresh_token expires (after 7 days), user needs to login again
     """
+    # Audit M：帳號層級節流（指數退避）。IP 節流在 proxy 後會失效、攻擊者也可換 IP，
+    # 以 username 為 key 的鎖定補上這個缺口。
+    check_login_allowed(form_data.username)
+
     user = user_service.authenticate_user(db, form_data.username, form_data.password)
     if not user:
+        record_login_failure(form_data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    reset_login_failures(form_data.username)
 
     # Create access token (short-lived)
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -104,11 +118,9 @@ def refresh_access_token(
     Returns:
         New access_token and refresh_token pair
     """
-    # Verify the refresh token
-    user = verify_refresh_token(db, token_request.refresh_token)
-
-    # Revoke the old refresh token (one-time use for better security)
-    revoke_refresh_token(db, token_request.refresh_token)
+    # Audit M：原子輪替（單一 UPDATE 搶佔）+ 重用偵測（已撤銷 token 被重用
+    # → 撤銷該使用者全部 refresh token）。取代舊的 verify→revoke→create 三步競態流程。
+    user = rotate_refresh_token(db, token_request.refresh_token)
 
     # Create new access token
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -200,12 +212,15 @@ def register_user(request: Request, user: schemas.UserCreate, db: Session = Depe
 
     Rate Limit: 3 requests per hour per IP (防止大量註冊攻擊)
     """
+    # Audit C1：開放註冊端點「絕不」採信 request body 的 role，
+    # 否則任何人 POST {"role":"admin"} 即可提權。特權帳號只能由既有 admin
+    # 透過受保護的使用者管理端點建立。
     created = user_service.create_user(
         db,
         username=user.username,
         email=user.email,
         password=user.password,
-        role=user.role or "assistant",
+        role="assistant",
     )
     return created
 

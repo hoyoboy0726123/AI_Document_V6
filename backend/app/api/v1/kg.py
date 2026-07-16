@@ -158,9 +158,28 @@ def extract_for_document(
     current_user=Depends(get_current_user),
 ):
     """Kick off KG extraction for a single document. Returns the background task ID."""
+    # Audit M：重運算端點配額（KG 抽取=大量 LLM 呼叫，會排爆序列 worker）
+    from ...utils.ratelimit import check_quota
+    check_quota(current_user.id, "kg_extract", limit=20, per_seconds=3600)
+
     document = db.query(models.Document).filter_by(id=document_id).first()
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
+
+    # 同文件已有 pending/running 的 KG 任務 → 直接回傳既有任務，不重複入列
+    existing = (
+        db.query(models.BackgroundTask)
+        .filter(
+            models.BackgroundTask.task_type == "kg_extract",
+            models.BackgroundTask.document_id == document_id,
+            models.BackgroundTask.status.in_(("pending", "running")),
+        )
+        .first()
+    )
+    if existing:
+        from ...services import kg_queue
+        return {"task_id": existing.id, "document_id": document_id,
+                "queue_depth": kg_queue.queue_depth(), "deduplicated": True}
 
     task = models.BackgroundTask(
         task_type="kg_extract",

@@ -8,11 +8,14 @@ import useAuthStore from '../stores/authStore';
 const LoginPage = () => {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const { login } = useAuthStore();
+  const { login, logout } = useAuthStore();
 
   const onFinish = async ({ username, password }) => {
     setLoading(true);
     try {
+      // Audit H10：登入前先清掉上一位使用者的殘留身分/token，
+      // 避免攔截器或殘留狀態把新登入綁到舊帳號。
+      logout();
       const formData = new URLSearchParams();
       formData.append('username', username);
       formData.append('password', password);

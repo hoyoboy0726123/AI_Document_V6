@@ -692,10 +692,12 @@ class OllamaClient:
         truncate: bool = True,
         dimensions: Optional[int] = None,
     ) -> List[List[float]]:
-        # bge-large-zh-v1.5 上限 512 tokens；中文 ≈ 1 token/char、英文 ≈ 0.25 token/char。
-        # Ollama 的 truncate=True 對此模型實測不可靠，這裡做防護式截斷，保守取 450 字
-        # 以同時覆蓋中文最壞情況並留 buffer。
-        max_chars = 450
+        # Audit H1：防護式截斷上限改為可設定（settings.EMBEDDING_MAX_CHARS，預設 2000）。
+        # 舊版硬編 450 → 1800 字 chunk 只有前 25% 進向量、後段內容永遠檢索不到。
+        # 部署的 qwen3-embedding 上下文遠大於 2000 字；truncate=True 仍作為伺服器端保險。
+        # 若改用 512-token 的 bge-large，請在 .env 設 EMBEDDING_MAX_CHARS=450。
+        from ..core.config import settings as _settings
+        max_chars = getattr(_settings, "EMBEDDING_MAX_CHARS", 2000) or 2000
         safe_inputs = [
             (s or "")[:max_chars] if isinstance(s, str) else str(s or "")[:max_chars]
             for s in inputs

@@ -17,6 +17,9 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
+_ALLOWED_ROLES = {"admin", "assistant"}
+
+
 def get_user_by_username(db: Session, username: str) -> Optional[models.User]:
     return db.query(models.User).filter(models.User.username == username).first()
 
@@ -37,6 +40,11 @@ def create_user(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already registered")
     if get_user_by_email(db, email):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+
+    # Audit C1 縱深防禦：role 只允許白名單值，非法值一律降為 assistant，
+    # 避免任何呼叫端（含未來新端點）不小心讓外部輸入指定成 admin。
+    if role not in _ALLOWED_ROLES:
+        role = "assistant"
 
     db_user = models.User(
         username=username,

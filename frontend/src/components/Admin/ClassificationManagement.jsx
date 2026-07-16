@@ -199,7 +199,7 @@ const ClassificationManagement = () => {
         open={modalVisible}
         onCancel={() => setModalVisible(false)}
         onOk={handleSubmit}
-        destroyOnClose
+        destroyOnHidden
         width={600}
       >
         <Form layout="vertical" form={form}>

@@ -233,10 +233,16 @@ def _looks_like_enumeration(q: str) -> bool:
 
 # 混合查詢路由：關係/引用/版本/結構類 → 走 Agent（KG 工具有用、且 Agent 在這類是 RAG 超集）；
 # 純內容（怎麼進行/數值/條件/是什麼）→ 走純 RAG（更快、不會被 KG 工具淡化答案）。
+# Audit H16：英文詞全部補上 \b，否則 requires 命中 "required"、version 命中
+# "conversion"、deriv 命中 "derivative"、replace 命中 "replacement"，把純內容題誤判成關係題。
+# 另補 successor/後繼/下一版（原本漏了關係題的正向）。
+# 移除單獨的「參考/參照/依據」：它們是中文內容題的常見開頭（「依據 810H，514.6 加速度多少？」），
+# 誤判率高；真正的關係題會用「引用/取代/版本/哪些規範」，仍會被下面的詞捕捉。
 _RELATION_RE = re.compile(
-    r"(取代|被取代|沿革|演進|演化|版本|舊版|新版|前一?版|衍生|引用|參照|參考|依據|關係|"
+    r"(取代|被取代|沿革|演進|演化|版本|舊版|新版|前一?版|下一?版|後繼|衍生|引用|關係|"
     r"引用鏈|版本鏈|誰引用|被.*引用|哪些(規範|標準|文件|method|方法)|跟.*關係|和.*關係|與.*關係|"
-    r"supersed|replace|deriv|references?|cite[sd]?|requires?|version|revision|lineage|predecessor|relationship)",
+    r"\bsupersed|\breplace|\bderiv|\breferences?\b|\bcite[sd]?\b|\brequires?\b|\bversion\b|"
+    r"\brevision\b|\blineage\b|\bpredecessor\b|\bsuccessor\b|\brelationship\b)",
     re.IGNORECASE,
 )
 
@@ -253,7 +259,10 @@ _ENUM_STRUCT_RE = re.compile(
 # 程序列舉題：「(Method X) 有哪些程序 / 程序有哪些 / what procedures」
 _PROC_Q_RE = re.compile(r"((有)?哪些|列出|列舉|what|which).{0,12}(程序|procedure)s?|(程序|procedure)s?\s*(有哪些|是什麼)", re.IGNORECASE)
 # 應用題（「我的設備該做哪些測試」）：不要被 spec 關係區塊劫持，交給合成。
-_APP_RE = re.compile(r"我的|我們|我要|該做|應(該|做)|需要做|產品|設備|裝在|用在|安裝|要符合")
+# Audit H17：收窄。舊版單獨的「產品/設備/安裝」名詞出現就 is_app=True → 連
+# 「MIL-STD-810H 對設備的鹽霧測試引用哪些標準？」這種關係題也被封殺所有 KG 確定性答案。
+# 改為只認帶「使用者意圖」的措辭（我的/我們/該做/要符合/裝在/用在…），不再被裸名詞觸發。
+_APP_RE = re.compile(r"我的|我們|我要|該做|應(該|做)|需要做|裝在|用在|要符合|要不要做|該不該做")
 # 規範 id（用於確定性規範關係 fallback）：MIL-STD/HDBK/DTL/PRF、AR、ASTM、IEC、ISO、NATO STANAG
 _SPEC_ID_RE = re.compile(
     r"\b(MIL-(?:STD|HDBK|DTL|PRF)-\d+[A-Z]?|AR\s?\d+-\d+|ASTM\s?[A-Z]?\d+|IEC\s?\d+(?:-\d+)*|ISO\s?\d+|NATO\s?STANAG\s?\d+)\b",
@@ -585,7 +594,16 @@ def run_agent(
     """
     # 純列舉題（「有哪些子項目 / 列出全部」且非規格/判定/目的等細節面向）→ 直接用 KG 確定性完整列舉。
     # 不走下方 _structural_evidence 的 grounded 合成：合成受 num_ctx 預算限制會漏項（6 子項只展開 2 個）。
-    if _looks_like_enumeration(question) and _detect_aspect(question) is None:
+    # Audit C6：補上 relation/app guard（與迴圈後方 834/794 行一致）。
+    # 否則「MIL-STD-810H 引用了哪些標準？」（關係題，因「引用」被 route 判 agent）會在此被攔下，
+    # list_subitems 命中 810H 文件節點 → 回「共 N 個方法」收工，引用問題完全沒被回答；
+    # 「我的設備該做哪些測試？」（應用題）也會被同一路徑劫持成方法清單。
+    if (
+        _looks_like_enumeration(question)
+        and _detect_aspect(question) is None
+        and not _RELATION_RE.search(question)
+        and not _APP_RE.search(question)
+    ):
         try:
             fb = agent_tools.run_tool(db, "list_subitems", {"name": question})
         except Exception as e:

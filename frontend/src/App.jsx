@@ -1,22 +1,33 @@
-﻿import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
-import { ConfigProvider, App as AntdApp } from "antd";
+﻿import { lazy, Suspense } from "react";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { ConfigProvider, App as AntdApp, Spin } from "antd";
 import zhTW from "antd/locale/zh_TW";
 
-import LoginPage from "./pages/LoginPage";
-import RegisterPage from "./pages/RegisterPage";
-import DocumentsPage from "./pages/DocumentsPage";
-import DocumentCreatePage from "./pages/DocumentCreatePage";
-import DocumentDetailPage from "./pages/DocumentDetailPage";
-import DocumentEditPage from "./pages/DocumentEditPage";
-import QAConsolePage from "./pages/QAConsolePage";
-import AdminPage from "./pages/AdminPage";
-import VectorSearchTestPage from "./pages/VectorSearchTestPage";
-import VectorHealthPage from "./pages/VectorHealthPage";
-import NotebookPage from "./pages/NotebookPage";
-import KnowledgeGraphPage from "./pages/KnowledgeGraphPage";
 import PrivateRoute from "./components/PrivateRoute";
 import { TaskStatusProvider } from "./contexts/TaskStatusContext";
 import TaskProgressBanner from "./components/TaskProgressBanner";
+import ErrorBoundary from "./components/ErrorBoundary";
+
+// Audit L：路由層 code-splitting —— react-pdf / react-force-graph 等重依賴
+// 不再全部打進首屏 bundle，各頁面按需載入。
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const RegisterPage = lazy(() => import("./pages/RegisterPage"));
+const DocumentsPage = lazy(() => import("./pages/DocumentsPage"));
+const DocumentCreatePage = lazy(() => import("./pages/DocumentCreatePage"));
+const DocumentDetailPage = lazy(() => import("./pages/DocumentDetailPage"));
+const DocumentEditPage = lazy(() => import("./pages/DocumentEditPage"));
+const QAConsolePage = lazy(() => import("./pages/QAConsolePage"));
+const AdminPage = lazy(() => import("./pages/AdminPage"));
+const VectorSearchTestPage = lazy(() => import("./pages/VectorSearchTestPage"));
+const VectorHealthPage = lazy(() => import("./pages/VectorHealthPage"));
+const NotebookPage = lazy(() => import("./pages/NotebookPage"));
+const KnowledgeGraphPage = lazy(() => import("./pages/KnowledgeGraphPage"));
+
+const PageFallback = (
+  <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "60vh" }}>
+    <Spin size="large" />
+  </div>
+);
 
 function App() {
   return (
@@ -24,6 +35,8 @@ function App() {
       <AntdApp>
         <TaskStatusProvider>
         <Router>
+          <ErrorBoundary>
+          <Suspense fallback={PageFallback}>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
@@ -111,7 +124,9 @@ function App() {
               )}
             />
           </Routes>
+          </Suspense>
           <TaskProgressBanner />
+          </ErrorBoundary>
         </Router>
         </TaskStatusProvider>
       </AntdApp>
