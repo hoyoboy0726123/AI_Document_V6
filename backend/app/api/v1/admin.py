@@ -503,7 +503,15 @@ def clear_all_vectors(
             faiss_path.unlink()
             logger.info("FAISS 索引文件已刪除")
 
-        # 2. 清空所有 chunks 的 embeddings
+        # 2. 丟棄記憶體中的 index 快取。
+        #    只刪檔不夠：vector_store 會把 index 快取在模組層，快取還在的話
+        #    換 embedding 模型後仍會拿到舊維度的 index，使用者按了本功能卻依然
+        #    收到 dimension mismatch，非得重啟後端才生效。
+        from ...services import vector_store
+
+        vector_store.reset_index()
+
+        # 3. 清空所有 chunks 的 embeddings
         db.query(models.DocumentChunk).update({"embedding": []})
         db.commit()
 

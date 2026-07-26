@@ -32,6 +32,20 @@ def _write_index_atomic(index: faiss.Index) -> None:
     os.replace(str(tmp_path), str(_INDEX_PATH))
 
 
+def reset_index() -> None:
+    """丟棄記憶體中快取的 index，強制下次寫入時重新載入或重建。
+
+    _ensure_index() 會把 index 快取在模組層的 _INDEX。若外部把索引檔刪掉
+    （例如管理介面「刪除所有向量值」），快取仍是舊的，導致換 embedding 模型後
+    維度依然不符、非得重啟後端才會生效。刪檔/換模型後呼叫本函式即可免重啟。
+    """
+    global _INDEX, _INDEX_DIMENSION
+    with _INDEX_LOCK:
+        _INDEX = None
+        _INDEX_DIMENSION = None
+    logger.info("vector_store: in-memory FAISS index cache reset")
+
+
 def _ensure_index(dimension: int) -> faiss.Index:
     global _INDEX, _INDEX_DIMENSION
     if _INDEX is not None:
@@ -61,10 +75,15 @@ def add_embeddings(embeddings: Dict[int, List[float]]) -> None:
         # Audit H3：換 embedding 模型後維度不一致，舊版直接讓 faiss 拋難懂的錯、
         # 且已先刪舊向量造成資料遺失。這裡給明確錯誤，讓上層能中止並提示需全量重建。
         if index.d != dimension:
+            # 訊息要給「能真正解決的步驟」。舊訊息只叫人跑 rebuild_index，但
+            # rebuild_index 是從 DB 既有向量重建，而那些向量仍是舊模型的維度，
+            # 單獨執行無效——使用者會照做卻一再收到同樣錯誤。
             raise ValueError(
-                f"Embedding dimension mismatch: FAISS index expects {index.d} dimensions "
-                f"but got {dimension}. The embedding model likely changed — run a full "
-                f"index rebuild (rebuild_index) before adding new vectors."
+                f"向量維度不符：FAISS 索引為 {index.d} 維，但新向量是 {dimension} 維。"
+                f"通常是更換了 embedding 模型（維度隨模型而不同）。"
+                f"處理方式：到管理介面執行「刪除所有向量值」（會刪索引檔並重置快取），"
+                f"再對各文件執行「重新向量化」以新模型重新嵌入。"
+                f"（注意：單獨執行 rebuild_index 無效，因為它是從資料庫既有的舊維度向量重建。）"
             )
         index.add_with_ids(vectors, ids)
         _write_index_atomic(index)
