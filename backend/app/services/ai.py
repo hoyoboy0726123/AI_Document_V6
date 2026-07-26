@@ -559,6 +559,53 @@ def generate_fallback_answer(question: str) -> str:
     ])
 
 
+_FENCE_WRAPPER_RE = re.compile(r"^```[ \t]*(?:markdown|md)[ \t]*$", re.IGNORECASE)
+
+
+def strip_markdown_fence_wrapper(text: str) -> str:
+    """剝除 VL 模型「把整段輸出包進程式碼圍籬」的壞習慣。
+
+    提示詞第 7 條已要求不要包圍籬，但模型不一定遵守（實測同一份 PDF 在不同機器上，
+    有的會輸出 ```markdown ... ```）。這種包裝會造成兩個問題：
+      1. 前端依 Markdown 規範把整段當程式碼區塊原樣顯示（表格、標題都不會渲染）。
+      2. 圍籬符號混進 chunk 文字，污染全文檢索與 BM25 關鍵字比對。
+
+    只剝「包裝用」的圍籬（整段包住、或標記為 markdown/md 的區塊），
+    文件內真正的程式碼區塊（其他語言標記的 ```python 等）保留不動。
+    """
+    if not text or "```" not in text:
+        return text
+    stripped = text.strip()
+
+    # 情況一：整段被「單一」圍籬包住（```markdown ... ``` 或裸 ``` ... ```）。
+    # 必須確認剝完後內部不再有圍籬，否則代表是多區塊的情況，要交給下面處理，
+    # 不能在這裡直接回傳（否則會殘留中間的圍籬符號）。
+    whole = re.match(
+        r"^```[ \t]*(?:markdown|md)?[ \t]*\n(.*?)\n?```$",
+        stripped,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if whole and "```" not in whole.group(1):
+        return whole.group(1).strip()
+
+    # 情況二：模型分段輸出多個 ```markdown 區塊（實測一頁內會出現多組）
+    if any(_FENCE_WRAPPER_RE.match(ln.strip()) for ln in stripped.split("\n")):
+        kept: List[str] = []
+        in_wrapper = False
+        for line in stripped.split("\n"):
+            bare = line.strip()
+            if _FENCE_WRAPPER_RE.match(bare):
+                in_wrapper = True          # 進入包裝區塊，丟掉這行開頭圍籬
+                continue
+            if in_wrapper and bare == "```":
+                in_wrapper = False         # 對應的結尾圍籬也丟掉
+                continue
+            kept.append(line)
+        return "\n".join(kept).strip()
+
+    return stripped
+
+
 def extract_text_with_vision(
     image_bytes_list: List[bytes],
     page_numbers: List[int],
@@ -617,7 +664,7 @@ def extract_text_with_vision(
                 ],
                 model=settings.OLLAMA_VISION_MODEL,
             )
-            text = raw.strip() if raw else ""
+            text = strip_markdown_fence_wrapper(raw.strip()) if raw else ""
             if text:
                 segments.append({
                     "page": page_num,

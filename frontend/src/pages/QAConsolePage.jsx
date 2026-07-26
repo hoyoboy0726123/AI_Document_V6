@@ -33,6 +33,30 @@ import PdfPreviewModal from "../components/Documents/PdfPreviewModal";
 
 const { Text } = Typography;
 
+// 保險層：舊資料的向量塊可能被 VL 模型包在 ```markdown 圍籬裡（後端 ai.py 已在
+// 新資料入庫前剝除，但既有資料若不重跑 OCR 仍帶著圍籬）。若不剝掉，ReactMarkdown
+// 會依規範把整段當程式碼區塊原樣顯示，表格與標題都不會渲染。
+// 只處理「包裝用」圍籬；文件內真正的程式碼區塊（```python 等）保留。
+const stripFenceWrapper = (text) => {
+  if (!text || !text.includes("```")) return text;
+  const src = text.trim();
+  const whole = src.match(/^```[ \t]*(?:markdown|md)?[ \t]*\n([\s\S]*?)\n?```$/i);
+  if (whole && !whole[1].includes("```")) return whole[1].trim();
+
+  const isWrapper = (line) => /^```[ \t]*(?:markdown|md)[ \t]*$/i.test(line.trim());
+  if (!src.split("\n").some(isWrapper)) return src;
+
+  const kept = [];
+  let inWrapper = false;
+  for (const line of src.split("\n")) {
+    const bare = line.trim();
+    if (isWrapper(bare)) { inWrapper = true; continue; }
+    if (inWrapper && bare === "```") { inWrapper = false; continue; }
+    kept.push(line);
+  }
+  return kept.join("\n").trim();
+};
+
 const QAConsolePage = () => {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -688,7 +712,7 @@ const QAConsolePage = () => {
           renderItem={(source, idx) => {
             const key = `${msgIndex}-${idx}`;
             const isExpanded = !!expandedSnippets[key];
-            const full = source.snippet || "";
+            const full = stripFenceWrapper(source.snippet || "");
             const needsTruncate = full.length > 200;
             const displaySnippet = needsTruncate && !isExpanded ? full.slice(0, 200) : full;
             return (
