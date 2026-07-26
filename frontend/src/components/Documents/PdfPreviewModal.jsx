@@ -814,7 +814,7 @@ const PdfPreviewModal = ({
                     type="primary"
                     icon={<SendOutlined />}
                     loading={analyzing}
-                    disabled={analyzedPages.length === 0}
+                    disabled={analyzedPages.length === 0 || !followupQuestion.trim()}
                     onClick={async () => {
                       const pagesParam = (analyzedPages && analyzedPages.length) ? analyzedPages : [pageNumber];
                       await startStreamAnalysis(pagesParam, followupQuestion.trim(), buildHistoryPayload());
