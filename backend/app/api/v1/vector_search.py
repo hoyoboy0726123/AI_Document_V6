@@ -88,7 +88,19 @@ def vector_health(
     )
 
     TOO_SHORT = 100
-    TOO_LONG = 1800
+
+    # 「過長」門檻必須跟著實際切塊設定走，不能寫死。
+    # split_segments_into_chunks() 切出一塊後，下一塊會先塞入 overlap_chars 的重疊
+    # 再累積到 max_chars，因此正常產出的塊最大可達 max_chars + overlap_chars。
+    # 舊版寫死 1800（只等於 max_chars），導致所有帶重疊的正常塊都被誤報為異常。
+    # 切塊參數可從管理介面調整（system_configs.vector_config），故在此動態取用。
+    try:
+        from ...services.system_config import SystemConfigService
+
+        _vc = SystemConfigService(db).get_vector_config()
+        TOO_LONG = int(_vc.get("max_chars", 1800)) + int(_vc.get("overlap_chars", 250))
+    except Exception:  # 設定讀取失敗時退回保守預設，不讓健康檢查整個掛掉
+        TOO_LONG = 1800 + 250
 
     total_chunks = len(chunks)
     total_chars = sum(len(c.text) for c in chunks)
