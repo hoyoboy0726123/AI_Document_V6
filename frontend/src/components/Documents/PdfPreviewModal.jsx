@@ -601,7 +601,7 @@ const PdfPreviewModal = ({
     >
       {fileUrl ? (
         <div style={{ height: "100%", display: "flex", gap: 16 }}>
-          <div style={{ flex: showAnalysis ? "0 0 55%" : "1", display: "flex", flexDirection: "column" }}>
+          <div style={{ flex: showAnalysis ? "0 0 55%" : "1", minWidth: 0, display: "flex", flexDirection: "column" }}>
             <Space style={{ marginBottom: 12 }} wrap>
               <Button icon={<MinusOutlined />} onClick={() => handleZoom(-0.15)} />
               <Button icon={<PlusOutlined />} onClick={() => handleZoom(0.15)} />
@@ -724,7 +724,7 @@ const PdfPreviewModal = ({
           </div>
 
           {showAnalysis && (
-            <div style={{ flex: "0 0 43%", display: "flex", flexDirection: "column", borderLeft: "2px solid #f0f0f0", paddingLeft: 16 }}>
+            <div style={{ flex: "0 0 43%", minWidth: 0, display: "flex", flexDirection: "column", borderLeft: "2px solid #f0f0f0", paddingLeft: 16 }}>
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <Typography.Title level={5} style={{ margin: 0 }}>
