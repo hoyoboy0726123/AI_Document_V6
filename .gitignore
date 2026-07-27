@@ -46,3 +46,7 @@ TODOS.md
 .shots/
 _deckpreview/
 
+
+# LightRAG PoC 隔離環境（避免 pandas 降級影響 paddlex/PaddleOCR）
+backend/.venv_lightrag/
+backend/storage/lightrag/
