@@ -50,3 +50,7 @@ _deckpreview/
 # LightRAG PoC 隔離環境（避免 pandas 降級影響 paddlex/PaddleOCR）
 backend/.venv_lightrag/
 backend/storage/lightrag/
+
+# 評測腳本的結果傾印(可重跑產生，不進版控)
+backend/scripts/*_detail.json
+backend/scripts/*_eval.json

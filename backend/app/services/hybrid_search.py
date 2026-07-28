@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import sqlite3
@@ -105,6 +106,64 @@ def _build_match(query: str) -> Optional[str]:
     return " OR ".join('"%s"' % t.replace('"', "") for t in seen)
 
 
+_HAS_CJK_RE = re.compile(r"[一-鿿]")
+_EN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
+_TRANSLATE_CACHE: Dict[str, str] = {}
+_TRANSLATE_CACHE_MAX = 512
+_TRANSLATE_LOCK = threading.Lock()
+# 共用 executor：逾時後不等待該執行緒收尾（見 keyword_search 內註解）。
+# worker 數刻意小，避免翻譯卡住時無上限累積執行緒。
+_TRANSLATE_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="kwtranslate"
+)
+
+_TRANSLATE_PROMPT = (
+    "把下面的中文技術問題，轉成 2-4 個用於全文檢索的英文關鍵詞。\n"
+    "只輸出關鍵詞，用空白分隔，不要解釋、不要標點、不要編號。\n\n"
+    "問題：{q}\n英文關鍵詞："
+)
+
+
+def _translate_for_keyword(query: str) -> str:
+    """把中文查詢轉成英文檢索詞（含快取）。任何失敗都回空字串，由呼叫端當作沒發生。"""
+    key = query.strip()
+    with _TRANSLATE_LOCK:
+        hit = _TRANSLATE_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    from .llm_provider import get_llm_provider
+
+    provider = get_llm_provider()
+    raw = provider.chat(
+        [{"role": "user", "content": _TRANSLATE_PROMPT.format(q=key)}],
+        options={"temperature": 0.0, "num_ctx": 2048},
+    )
+    terms = " ".join(_EN_WORD_RE.findall(raw or ""))[:120]
+
+    with _TRANSLATE_LOCK:
+        if len(_TRANSLATE_CACHE) >= _TRANSLATE_CACHE_MAX:
+            _TRANSLATE_CACHE.clear()  # 簡單汰換：滿了就清空，避免無上限成長
+        _TRANSLATE_CACHE[key] = terms
+    return terms
+
+
+def _fts_query(path: str, match: str, top_k: int) -> List[Tuple[int, float]]:
+    with _BUILD_LOCK:
+        conn = _connect(path)
+        try:
+            _ensure_index(conn)
+            rows = conn.execute(
+                f"SELECT rowid, bm25({_FTS_TABLE}) AS s "
+                f"FROM {_FTS_TABLE} WHERE {_FTS_TABLE} MATCH ? "
+                f"ORDER BY s LIMIT ?",
+                (match, top_k),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [(int(r[0]), float(r[1])) for r in rows]
+
+
 def keyword_search(db: Session, query: str, top_k: int) -> List[Tuple[int, float]]:
     """BM25 關鍵字檢索；回傳 [(faiss_id, bm25_score)]，bm25 越小越相關。"""
     if not getattr(settings, "RAG_HYBRID_SEARCH", True):
@@ -116,21 +175,43 @@ def keyword_search(db: Session, query: str, top_k: int) -> List[Tuple[int, float
     if not match:
         return []
     try:
-        with _BUILD_LOCK:
-            conn = _connect(path)
-            try:
-                _ensure_index(conn)
-                rows = conn.execute(
-                    f"SELECT rowid, bm25({_FTS_TABLE}) AS s "
-                    f"FROM {_FTS_TABLE} WHERE {_FTS_TABLE} MATCH ? "
-                    f"ORDER BY s LIMIT ?",
-                    (match, top_k),
-                ).fetchall()
-            finally:
-                conn.close()
-        return [(int(r[0]), float(r[1])) for r in rows]
+        rows = _fts_query(path, match, top_k)
     except Exception as e:  # FTS 任何問題都退回純向量，絕不讓檢索整個壞掉
         logger.warning("hybrid_search keyword_search failed, falling back: %s", e)
+        return []
+
+    if rows:
+        return rows
+
+    # 撈到 0 筆且查詢含中文 → 語料很可能是英文（MIL-STD 等），中文整句被當成單一片語
+    # 而永遠不命中。此時才付翻譯成本，轉成英文檢索詞重試一次。
+    # 只在「本來就已經失效」的情況觸發，因此不會動到原本正常的查詢。
+    if not getattr(settings, "RAG_QUERY_TRANSLATE_FALLBACK", True):
+        return rows
+    if not _HAS_CJK_RE.search(query):
+        return rows
+
+    try:
+        # provider.chat 沒有 timeout 參數，而 OLLAMA_TIMEOUT 預設可達數百秒；
+        # 這是「救援路徑」，不能讓它拖住整個查詢，因此用執行緒強制設上限。
+        # 注意：不可用 `with ThreadPoolExecutor(...)`，離開 with 會 shutdown(wait=True)
+        # 阻塞等待該執行緒跑完，逾時形同虛設（實測仍等滿 30s）。改用共用的 executor，
+        # 逾時就放生那個執行緒，讓查詢先走。
+        limit = int(getattr(settings, "RAG_QUERY_TRANSLATE_TIMEOUT", 8) or 8)
+        terms = _TRANSLATE_POOL.submit(_translate_for_keyword, query).result(timeout=limit)
+        if not terms:
+            return rows
+        retry_match = _build_match(terms)
+        if not retry_match:
+            return rows
+        rows = _fts_query(path, retry_match, top_k)
+        logger.info(
+            "hybrid_search: 中文查詢 BM25 0 命中，改用英文檢索詞「%s」重試 → %d 筆",
+            terms, len(rows),
+        )
+        return rows
+    except Exception as e:  # 翻譯/重試失敗一律當作沒發生，維持原本的純向量行為
+        logger.warning("hybrid_search translate fallback failed, keeping vector-only: %s", e)
         return []
 
 

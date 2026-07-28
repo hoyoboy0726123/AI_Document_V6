@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     RAG_TABLE_ROWWISE_TOP: int = 1
     RAG_HYBRID_SEARCH: bool = True
     RAG_RRF_K: int = 60                         # RRF 常數，越大越平滑（標準值 60）
+    # 中文查詢救援：語料是英文規範、使用者用中文問時，FTS5 trigram 會把整句中文當成
+    # 單一片語，實測 12 題全部 0 命中 —— 混合檢索的關鍵字那一半等於空轉。
+    # 開啟後「只在 BM25 撈到 0 筆且查詢含中文」時，才用 LLM 轉成英文檢索詞重試一次。
+    # 設計成「失效才觸發」而非全域開關：BM25 本來就有命中的情況（中文語料、英文查詢、
+    # 含料號/條號的查詢）完全不會進來，不付額外延遲、也不會影響原本正常的排序。
+    # 實測（12 題 / MIL-STD-810H）：recall@5 0.567→0.667，翻譯耗時約 0.44s（模型已載入）。
+    RAG_QUERY_TRANSLATE_FALLBACK: bool = True
+    RAG_QUERY_TRANSLATE_TIMEOUT: int = 8        # 翻譯逾時（秒）；逾時直接放棄，不拖累查詢
     # 融合後餵進 LLM 的「context 塊數」上限。hybrid recall 高但塊一多就破碎，
     # 過多分散塊會讓生成退化；超出的命中仍會列在 sources（前端可預覽），只是不進 LLM context。
     RAG_MAX_CONTEXT_CHUNKS: int = 6
