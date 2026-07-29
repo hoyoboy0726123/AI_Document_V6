@@ -68,13 +68,82 @@ sub-items whose pages don't contain the keyword (e.g. a 'Surface Deflection' sub
 and merge — the final answer must cover ALL sub-items, not only the ones rag_search surfaced.
 - If a tool returns no relevant info, try another tool or a different query — do NOT \
 hallucinate spec content. If the corpus truly lacks info, say so in final_answer.
-- Stop and emit final_answer as soon as you have enough evidence. Brevity is preferred for \
+- Do NOT settle for a "the test plan must specify X" answer. Standards documents have an \
+"INFORMATION REQUIRED" section that merely NAMES the parameters (salt solution pH, fallout \
+rate, air velocity...) and a separate procedure section that holds the ACTUAL VALUES. If your \
+evidence only names parameters without values, you have NOT answered — take the parameter \
+names from that list and run another rag_search for each (English terms work better: the \
+corpus is English), or search the method's procedure/step sections, before finishing.
+- When the user asks for conditions, parameters, limits, durations or tolerances, the answer \
+MUST contain concrete numbers with units. Keep searching with different wording until you \
+have them, or state explicitly which value is missing and where it likely lives.
+- Emit final_answer once the evidence genuinely answers the question. Brevity is preferred for \
 SINGLE-item questions; but for category/group questions completeness wins — make sure every \
 sub-item (per list_subitems / coverage_check) is represented before finishing.
 - Always answer in the user's language (zh-TW if they wrote Chinese; English otherwise).
 - Cite document titles or spec canonical_ids inline when summarizing findings.
 
 Max {max_steps} steps. After that, you MUST emit final_answer."""
+
+
+# ── 參數題補救：判斷「使用者要數值」與「答案沒給數值」───────────────────────
+_PARAM_RETRY_MAX = 2
+
+# 問題在要具體條件/數值
+_WANTS_VALUE_RE = re.compile(
+    r"條件|參數|規格|多少|數值|幾度|幾小時|溫度|濕度|濃度|時間|速率|流速|公差|範圍|限值|要求|標準值"
+    # 英文問法用寬鬆比對：「what is the salt concentration」中間會夾字，
+    # 寫成 what\s+(concentration) 會漏掉。
+    r"|how\s+(much|long|many)"
+    r"|what.{0,24}(value|temperature|concentration|rate|duration|limit|tolerance|pressure)"
+    r"|parameter|condition|requirement",
+    re.I,
+)
+# 帶單位的具體數值（規範常用單位）
+_VALUE_TOKEN_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:%|°\s?[CF]|º[CF]|℃|℉|m/s|ft/min|g/m3|g/m³|g/ft3|ml/cm|kPa|hPa|psi|Hz|dB"
+    r"|mm|cm|inch|英寸|小時|分鐘|秒|天|hours?|minutes?|days?)",
+    re.I,
+)
+# 「沒給數值」的典型措辭
+_VAGUE_RE = re.compile(r"需(根據|依|在).{0,12}(指定|規定|設定)|需明確規定|由測試計畫|依測試計畫|未明確")
+
+
+def _wants_values(question: str) -> bool:
+    return bool(_WANTS_VALUE_RE.search(question or ""))
+
+
+def _lacks_values(answer: str) -> bool:
+    """答案是否缺乏具體數值。
+
+    判準刻意保守：不是「完全沒數字」就算不足，而是「數值很少且充斥空話」——
+    避免把本來就沒有數值的題型（如適用範圍、測試目的）也拖進補救迴圈。
+    """
+    if not answer:
+        return True
+    n_values = len(set(_VALUE_TOKEN_RE.findall(answer)))
+    n_vague = len(_VAGUE_RE.findall(answer))
+    return n_values <= 2 and n_vague >= 2
+
+
+def _extract_param_terms(evidence: List[Dict[str, Any]], answer: str) -> List[str]:
+    """從證據與答案中撈出「參數名稱」當作下一輪查詢關鍵字。
+
+    規範的 INFORMATION REQUIRED 章節會逐條列出參數名稱，例如
+    "(a) Salt solution pH. (b) Salt solution fallout rate (ml/cm2/hr)."
+    這些名稱正是找實際數值最好的查詢種子（且為英文，與語料語言一致）。
+    """
+    blob = " ".join(
+        (e.get("snippet") or e.get("text") or "") for e in evidence
+    ) + " " + (answer or "")
+    terms: List[str] = []
+    # (a) Xxx yyy.  /  (1) Xxx yyy.  形式的條列項目
+    # 字元類要含數字，否則 "Salt solution fallout rate (ml/cm2/hr)" 會被切斷而漏掉
+    for m in re.finditer(r"\([a-z0-9]\)\s*([A-Z][A-Za-z0-9 /()\-]{6,60}?)\s*[.\n]", blob):
+        t = re.sub(r"\s+", " ", m.group(1)).strip(" .")
+        if 6 <= len(t) <= 60 and t.lower() not in [x.lower() for x in terms]:
+            terms.append(t)
+    return terms[:6]
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
@@ -987,6 +1056,46 @@ def run_agent(
             synth, syn_sources, n_used = _synthesize()
         except Exception as e:
             logger.warning("agent supplement round failed: %s", e)
+
+    # 參數題的補救迴圈（確定性判斷，不依賴模型自我宣告）。
+    #
+    # 動機：規範文件的「INFORMATION REQUIRED」章節只列出參數「名稱」（salt solution pH、
+    # fallout rate…），實際數值在另一節的程序裡。檢索常命中前者，模型便交出一張
+    # 每列都寫「需依測試計畫指定」的表格 —— 對使用者等於什麼都沒查到。
+    # 原本的充足性檢查只看「合成是否成功 / 有無 KG 邊 / seed 信心」，抓不到這種情況。
+    #
+    # 這裡改用可驗證的條件：問題在要數值 且 答案幾乎沒有帶單位的數字 → 視為未達成，
+    # 用「證據裡出現的參數名稱」當新關鍵字再查一輪（那份清單本身就是最好的查詢種子）。
+    for attempt in range(1, _PARAM_RETRY_MAX + 1):
+        if not (synth and _wants_values(question) and _lacks_values(synth)):
+            break
+        terms = _extract_param_terms(rag_evidence, synth)
+        if not terms:
+            break
+        yield {"type": "thought", "step": max_steps + 1 + attempt,
+               "text": f"答案只列出需指定的項目、沒有實際數值，改用參數名稱重查："
+                       + "、".join(terms[:4])}
+        try:
+            added = 0
+            seen = {(e.get("document_id"), e.get("page"),
+                     (e.get("snippet") or e.get("text") or "")[:48]) for e in rag_evidence}
+            for term in terms[:4]:
+                more, _ = _seed_evidence_via_rag(db, f"{term} value requirement", top_k=5)
+                for e in more:
+                    k = (e.get("document_id"), e.get("page"),
+                         (e.get("snippet") or e.get("text") or "")[:48])
+                    if k not in seen:
+                        rag_evidence.append(e)
+                        seen.add(k)
+                        added += 1
+            if not added:
+                break
+            new_synth, new_sources, new_used = _synthesize()
+            if new_synth:
+                synth, syn_sources, n_used = new_synth, new_sources, new_used
+        except Exception as e:
+            logger.warning("agent param retry round %d failed: %s", attempt, e)
+            break
 
     if synth and synth.strip():
         final_text = synth
