@@ -756,7 +756,8 @@ def analyze_pdf_page_images_stream(
 
     Yields dicts: {"type": "thinking"|"content", "text": "..."}
 
-    No-question mode: one VL request per page to ensure all pages are analyzed.
+    No-question mode（多頁）: 一頁一次 VL 請求，最後再做一次純文字的跨頁彙整。
+    這樣才能確保每一頁都被分析到（模型在單次請求收到多張圖時會自行併頁）。
     Question mode: single request with all images so the answer can span pages.
     """
     if not image_bytes_list:
@@ -853,6 +854,21 @@ def analyze_pdf_page_images_stream(
             "列出 5–8 條最重要的資訊或結論（條列式）。\n"
         )
 
+    vl_model = settings.OLLAMA_VISION_MODEL or settings.OLLAMA_LLM_MODEL
+
+    # 多頁「整體分析」（未指定問題）改為逐頁請求，最後再彙整跨頁段落。
+    #
+    # 原本一次把所有圖片送進同一個請求。實測 10 張圖只用掉 10,426 tokens、
+    # num_ctx 有 17,096，並沒有超出——但模型仍會自行把 10 頁併成 5 段描述，
+    # 還在結尾聲稱「完整涵蓋 10 頁」。使用者挑了 10 頁就是要看 10 頁，
+    # 靠提示詞要求模型自律並不可靠，因此改成一頁一次請求（本函式 docstring
+    # 原本描述的就是這個設計，只是未被實作）。
+    if not has_question and len(images) > 1:
+        yield from _stream_per_page_report(
+            client, vl_model, images, page_numbers, history_text
+        )
+        return
+
     composed = (
         f"上下文（參考用）:\n{history_text or '(無)'}\n\n"
         f"{task}\n"
@@ -866,10 +882,88 @@ def analyze_pdf_page_images_stream(
 
     for delta in client.chat_stream(
         messages,
-        model=settings.OLLAMA_VISION_MODEL or settings.OLLAMA_LLM_MODEL,
+        model=vl_model,
         options={"num_ctx": _vl_num_ctx(len(images))},
     ):
         yield delta
+
+
+_PER_PAGE_RULES = (
+    "您是專業的文件分析助理，請使用繁體中文（台灣）分析「單一頁面」。\n"
+    "1. 頁面中的圖片、示意圖、流程圖、表格都必須描述：主題與用途、主要元素與\n"
+    "   箭頭關係、圖中嵌入的文字（含英文標籤）。\n"
+    "2. 表格請保留行列對應關係。\n"
+    "3. 條列 2–4 條該頁核心重點。\n"
+    "4. 只描述這一頁，不要臆測其他頁面的內容。\n"
+    "5. 嚴禁使用簡體中文。\n"
+)
+
+_SYNTH_RULES = (
+    "您是專業的文件分析助理，請使用繁體中文（台灣）作答。\n"
+    "以下是同一份文件多個頁面的逐頁分析結果。請據此彙整跨頁層級的說明，\n"
+    "不要重複逐頁細節，也不要加入分析結果中沒有的內容。\n"
+)
+
+
+def _stream_per_page_report(client, vl_model, images, page_numbers, history_text):
+    """逐頁分析後彙整：確保每一頁都真的被看過、被寫出來。"""
+    per_page_notes: List[str] = []
+
+    for idx, (image_b64, page_num) in enumerate(zip(images, page_numbers), start=1):
+        # chat_stream 產生的是 {"type": "content"|"thinking", "text": ...}，
+        # 自行插入的文字也要用同樣格式，否則前端 SSE 解析會拿到裸字串。
+        yield {"type": "content", "text": f"\n\n## 第 {page_num} 頁\n\n"}
+        task = (
+            f"請分析這一頁（第 {page_num} 頁，共 {len(images)} 頁中的第 {idx} 頁）的內容。\n"
+            "回答（繁體中文）："
+        )
+        buf: List[str] = []
+        try:
+            for delta in client.chat_stream(
+                [
+                    {"role": "system", "content": _PER_PAGE_RULES},
+                    {"role": "user", "content": task, "images": [image_b64]},
+                ],
+                model=vl_model,
+                options={"num_ctx": _vl_num_ctx(1)},
+            ):
+                # 彙整時只需要正文，thinking 不納入（會污染後續的跨頁摘要）
+                if isinstance(delta, dict) and delta.get("type") == "content":
+                    buf.append(str(delta.get("text") or ""))
+                yield delta
+        except Exception as exc:  # noqa: BLE001
+            # 單頁失敗不中斷整份分析，明確標記讓使用者知道哪一頁沒成功
+            msg = f"（第 {page_num} 頁分析失敗：{exc}）"
+            logger.warning("per-page VL failed page=%s: %s", page_num, exc)
+            yield {"type": "content", "text": msg}
+            buf.append(msg)
+        per_page_notes.append(f"[第 {page_num} 頁]\n{''.join(buf).strip()}")
+
+    # 跨頁彙整：純文字請求，不再送圖片
+    yield {"type": "content", "text": "\n\n---\n"}
+    notes = "\n\n".join(per_page_notes)
+    synth_task = (
+        f"上下文（參考用）:\n{history_text or '(無)'}\n\n"
+        f"逐頁分析結果：\n{notes}\n\n"
+        "請輸出以下三個段落：\n\n"
+        "## 整體主題\n這幾頁整體在描述什麼？目的與背景為何？\n\n"
+        "## 跨頁關聯\n說明各頁之間的邏輯關係、延伸脈絡，或共同指向的結論。\n\n"
+        "## 核心重點摘要\n列出 5–8 條最重要的資訊或結論（條列式）。\n\n"
+        "回答（繁體中文）："
+    )
+    try:
+        for delta in client.chat_stream(
+            [
+                {"role": "system", "content": _SYNTH_RULES},
+                {"role": "user", "content": synth_task},
+            ],
+            model=vl_model,
+            options={"num_ctx": min(32768, 4096 + len(notes) // 2)},
+        ):
+            yield delta
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cross-page synthesis failed: %s", exc)
+        yield {"type": "content", "text": f"\n（跨頁彙整失敗：{exc}）"}
 
 
 def finalize_text_answer(notes: str, question: Optional[str] = None) -> str:
