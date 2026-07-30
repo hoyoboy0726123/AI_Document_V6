@@ -744,18 +744,27 @@ _VL_OUTPUT_RESERVE = 4096
 # 追問時帶入的歷史上限。舊版塞入最近 3 輪的「完整答案」，而整頁分析的答案動輒
 # 3,000 字，三輪就約 6,600 字（約 5,600 tokens），把輸出額度吃光。
 #
-# 額度刻意「不對稱」分配:追問真正要銜接的是「最新那一輪」（使用者說「那這個呢」
-# 指的就是上一則），較舊的幾輪只需要一點脈絡即可。因此把大部分額度留給最新一輪，
-# 舊的壓得很短；總量超過上限時由舊到新逐輪捨棄，最新一輪永遠保留。
-_VL_HISTORY_BUDGET_CHARS = 2600     # 歷史總量上限
-_VL_HISTORY_LATEST_CHARS = 1800     # 最新一輪的答案上限（優先分配）
-_VL_HISTORY_OLDER_CHARS = 400       # 較舊每輪的答案上限
+# 策略:「能完整放就完整放，放不下才丟最舊的，截斷是最後手段」。
+#
+# 預設帶最近 3 輪。若總量超過額度，由最舊往新逐輪捨棄；捨到只剩最新一輪時，
+# 那一輪可以獨享全部額度（不再被固定的較小上限綁住）。
+# 這樣才不會在還有空間時就把最關鍵的最新一輪切掉 —— 追問銜接的正是它。
+# 字數是 token 的近似（中英混雜約 2 字元/token），避免為此載入 tokenizer。
+_VL_HISTORY_BUDGET_CHARS = 2600     # 歷史總量上限（字元）
 _VL_HISTORY_MAX_TURNS = 3
 _TRUNC_NOTE = "…（僅節錄，供銜接語境）"
 
 
+def _render_turn(turn: Dict[str, str], answer_cap: Optional[int] = None) -> str:
+    q = str(turn.get("question") or "").strip()
+    a = str(turn.get("answer") or "").strip()
+    if answer_cap is not None and len(a) > answer_cap:
+        a = a[:answer_cap] + _TRUNC_NOTE
+    return f"Q: {q}\nA: {a}\n"
+
+
 def _compact_vl_history(conversation_history: Optional[List[Dict[str, str]]]) -> str:
-    """把追問要用的對話歷史壓到夠用就好，並優先保住最新一輪。
+    """追問要帶的對話歷史:完整優先、丟舊的次之、截斷最後。
 
     圖片一律不重複帶入（本來就只送當次選取的頁面），這裡處理的純粹是文字膨脹。
     """
@@ -763,22 +772,23 @@ def _compact_vl_history(conversation_history: Optional[List[Dict[str, str]]]) ->
     if not turns:
         return ""
 
-    # 由新到舊組裝，額度用完就不再往前追溯 —— 保證最新一輪不會被舊的擠掉
-    picked: List[str] = []
-    used = 0
-    for idx, turn in enumerate(reversed(turns)):
-        cap = _VL_HISTORY_LATEST_CHARS if idx == 0 else _VL_HISTORY_OLDER_CHARS
-        q = str(turn.get("question") or "").strip()
-        a = str(turn.get("answer") or "").strip()
-        if len(a) > cap:
-            a = a[:cap] + _TRUNC_NOTE
-        block = f"Q: {q}\nA: {a}\n"
-        if idx > 0 and used + len(block) > _VL_HISTORY_BUDGET_CHARS:
+    # 1) 從最近 N 輪開始，只要總量放得下就全部完整帶入（不截斷任何一輪）
+    while turns:
+        rendered = [_render_turn(t) for t in turns]
+        if sum(len(r) for r in rendered) <= _VL_HISTORY_BUDGET_CHARS or len(turns) == 1:
             break
-        picked.append(block)
-        used += len(block)
+        turns.pop(0)  # 仍超額 → 丟掉最舊的一輪，再試
 
-    return "\n".join(reversed(picked))
+    # 2) 只剩最新一輪卻仍超額 → 它獨享全部額度，截斷到剛好放得下
+    if len(turns) == 1:
+        only = _render_turn(turns[0])
+        if len(only) > _VL_HISTORY_BUDGET_CHARS:
+            overhead = len(only) - len(str(turns[0].get("answer") or ""))
+            cap = max(200, _VL_HISTORY_BUDGET_CHARS - overhead - len(_TRUNC_NOTE))
+            return _render_turn(turns[0], answer_cap=cap)
+        return only
+
+    return "\n".join(_render_turn(t) for t in turns)
 
 
 def _vl_num_ctx(n_images: int, text_len: int = 0) -> int:
