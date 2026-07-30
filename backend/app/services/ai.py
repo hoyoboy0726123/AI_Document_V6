@@ -743,25 +743,42 @@ _VL_OUTPUT_RESERVE = 4096
 
 # 追問時帶入的歷史上限。舊版塞入最近 3 輪的「完整答案」，而整頁分析的答案動輒
 # 3,000 字，三輪就約 6,600 字（約 5,600 tokens），把輸出額度吃光。
-# 歷史的用途只是讓模型知道「剛才在談什麼」，不需要逐字重述前一次的完整報告。
-_VL_HISTORY_TURNS = 2
-_VL_HISTORY_ANSWER_CHARS = 600
+#
+# 額度刻意「不對稱」分配:追問真正要銜接的是「最新那一輪」（使用者說「那這個呢」
+# 指的就是上一則），較舊的幾輪只需要一點脈絡即可。因此把大部分額度留給最新一輪，
+# 舊的壓得很短；總量超過上限時由舊到新逐輪捨棄，最新一輪永遠保留。
+_VL_HISTORY_BUDGET_CHARS = 2600     # 歷史總量上限
+_VL_HISTORY_LATEST_CHARS = 1800     # 最新一輪的答案上限（優先分配）
+_VL_HISTORY_OLDER_CHARS = 400       # 較舊每輪的答案上限
+_VL_HISTORY_MAX_TURNS = 3
+_TRUNC_NOTE = "…（僅節錄，供銜接語境）"
 
 
 def _compact_vl_history(conversation_history: Optional[List[Dict[str, str]]]) -> str:
-    """把追問要用的對話歷史壓到夠用就好。
+    """把追問要用的對話歷史壓到夠用就好，並優先保住最新一輪。
 
-    只取最近 N 輪，且每輪答案截斷到 _VL_HISTORY_ANSWER_CHARS。
     圖片一律不重複帶入（本來就只送當次選取的頁面），這裡處理的純粹是文字膨脹。
     """
-    parts: List[str] = []
-    for turn in (conversation_history or [])[-_VL_HISTORY_TURNS:]:
+    turns = list((conversation_history or [])[-_VL_HISTORY_MAX_TURNS:])
+    if not turns:
+        return ""
+
+    # 由新到舊組裝，額度用完就不再往前追溯 —— 保證最新一輪不會被舊的擠掉
+    picked: List[str] = []
+    used = 0
+    for idx, turn in enumerate(reversed(turns)):
+        cap = _VL_HISTORY_LATEST_CHARS if idx == 0 else _VL_HISTORY_OLDER_CHARS
         q = str(turn.get("question") or "").strip()
         a = str(turn.get("answer") or "").strip()
-        if len(a) > _VL_HISTORY_ANSWER_CHARS:
-            a = a[:_VL_HISTORY_ANSWER_CHARS] + "…（前次回答已截斷，僅供銜接語境）"
-        parts.append(f"Q: {q}\nA: {a}\n")
-    return "\n".join(parts)
+        if len(a) > cap:
+            a = a[:cap] + _TRUNC_NOTE
+        block = f"Q: {q}\nA: {a}\n"
+        if idx > 0 and used + len(block) > _VL_HISTORY_BUDGET_CHARS:
+            break
+        picked.append(block)
+        used += len(block)
+
+    return "\n".join(reversed(picked))
 
 
 def _vl_num_ctx(n_images: int, text_len: int = 0) -> int:
