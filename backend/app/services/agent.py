@@ -769,6 +769,48 @@ def run_agent(
             yield {"type": "final", "text": _clarify_scope_text(db, question), "sources": []}
             return
 
+    # 關係題 + 問句點名某規範 → 先給 KG 的權威關係清單，不要讓後面的路徑搶走。
+    #
+    # 這段原本只放在流程末端，但 _structural_evidence 命中文件節點時會走 grounded 合成
+    # 並提早 return（下方 749 行），到不了那裡。實測「MIL-STD-810H 引用了哪些標準」
+    # 因此只回 RAG 合成的 2 項，而 KG 裡實際有 63 項 —— 而且同一題有時給 63 項、
+    # 有時給 2 項，取決於哪條路徑先觸發。
+    # 對關係題而言，KG 的完整邊列表本來就比 RAG 合成可靠（RAG 受 num_ctx 限制會漏項），
+    # 所以在這裡先攔下來。應用題（「我的設備該做哪些…」）只是提到規範，不走這條。
+    if _RELATION_RE.search(question or "") and not _APP_RE.search(question or ""):
+        _m = _SPEC_ID_RE.search(question or "")
+        if _m:
+            from .. import models as _m_models
+
+            _cand = re.sub(r"\s+", "", _m.group(1)).upper()
+            _ent = (
+                db.query(_m_models.KGEntity)
+                .filter(_m_models.KGEntity.canonical_id == _cand)
+                .first()
+            )
+            if _ent and _ent.type not in ("section", "method", "annex", "document"):
+                _blk = _build_spec_relation_block(db, _ent.canonical_id)
+                if _blk:
+                    yield {"type": "thought", "step": 0,
+                           "text": f"關係題且點名「{_ent.canonical_id}」→ 直接用知識圖譜的完整關係清單"
+                                   "（比 RAG 合成可靠，不受 context 預算漏項影響）。"}
+                    _rag_part, _rag_src = None, []
+                    try:
+                        _seed, _ = _seed_evidence_via_rag(db, question, top_k=5)
+                        if _seed:
+                            _g, _rag_src, _n, _t = _grounded_synthesis(
+                                db, question, _seed, [], conversation_history
+                            )
+                            if _g and _g.strip():
+                                _rag_part = _g.strip()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("early spec-relation supplement failed: %s", e)
+                    _body = _blk if not _rag_part else (
+                        f"{_blk}\n\n── 補充（文件內容檢索）──\n{_rag_part}"
+                    )
+                    yield {"type": "final", "text": _body, "sources": _rag_src or []}
+                    return
+
     # 純列舉題（「有哪些子項目 / 列出全部」且非規格/判定/目的等細節面向）→ 直接用 KG 確定性完整列舉。
     # 不走下方 _structural_evidence 的 grounded 合成：合成受 num_ctx 預算限制會漏項（6 子項只展開 2 個）。
     # Audit C6：補上 relation/app guard（與迴圈後方 834/794 行一致）。
