@@ -909,13 +909,29 @@ def run_agent(
             break
 
         action = str(parsed.get("action") or "").strip()
+        action_input = parsed.get("action_input") or {}
+        if not isinstance(action_input, dict):
+            action_input = {"raw": str(action_input)}
+
+        # 模型有時把結束動作寫成 action 而非頂層 final_answer 鍵，例如
+        #   {"thought": "...", "action": "final_answer", "action_input": {"answer": "..."}}
+        # 上面的 `"final_answer" in parsed` 抓不到，就會落到 run_tool 去呼叫一個
+        # 不存在的工具，觀察值變成「'final_answer' 不是有效的工具」，白耗一步。
+        if action.lower() in ("final_answer", "finalanswer", "final", "answer"):
+            cand = (
+                action_input.get("answer")
+                or action_input.get("final_answer")
+                or action_input.get("text")
+                or action_input.get("raw")
+                or thought
+            )
+            final_text = str(cand or "").strip() or "暫無足夠資訊"
+            break
+
         # 容錯：LLM 偶爾把工具名叫錯（get_sumerules_item_details…）→ 正規化成有效名，
         # 讓 SSE 事件、run_tool 分派、以及下方依 action 名的後處理都用同一個正確名稱。
         if action and action not in agent_tools.TOOLS:
             action = agent_tools.resolve_tool_name(action) or action
-        action_input = parsed.get("action_input") or {}
-        if not isinstance(action_input, dict):
-            action_input = {"raw": str(action_input)}
 
         if not action:
             # missing action AND no final_answer — terminate with whatever we have
@@ -1099,7 +1115,13 @@ def run_agent(
             if ent and ent.type not in ("section", "method", "annex", "document"):
                 spec_center = ent.canonical_id
     # 應用題（「我的設備該做哪些…」）不走 spec 區塊（只是提到某規範，不是在問它的關係）→ 交給合成。
-    if spec_center and not _APP_RE.search(question or ""):
+    #
+    # 同理也要求「問題本身在問關係」：原本只要 agent 在探索途中呼叫過 spec_lookup /
+    # spec_references，就會把整份規範關係區塊（版本家族 + 63 項引用清單 + 取代鏈）
+    # 貼在答案最前面。實測問「振動測試的測試條件」時每次都被冠上這一大段，
+    # 追問時又重複一次 —— 使用者要的是測試條件，沒有在問規範關係。
+    is_relation_question = bool(_RELATION_RE.search(question or ""))
+    if spec_center and not _APP_RE.search(question or "") and is_relation_question:
         spec_block = _build_spec_relation_block(db, spec_center)
         if spec_block:
             rag_part, rag_sources = None, []
