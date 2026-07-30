@@ -108,6 +108,26 @@ _VALUE_TOKEN_RE = re.compile(
 # 「沒給數值」的典型措辭
 _VAGUE_RE = re.compile(r"需(根據|依|在).{0,12}(指定|規定|設定)|需明確規定|由測試計畫|依測試計畫|未明確")
 
+# 直接放棄的答案。實測 agent 有時在第 1 步就交出「查無相關資料」——
+# 明明語料裡有（同一題再問一次就答得出來），只是 seed 檢索該次撈到不相關的段落。
+_NO_ANSWER_RE = re.compile(
+    r"查無相關資料|查無資料|沒有找到|無法回答|找不到.{0,6}(資料|內容)|no relevant|not found",
+    re.I,
+)
+
+
+def _is_no_answer(text: str) -> bool:
+    """是否為「直接放棄」的答案。
+
+    判準是「放棄字樣出現在開頭」而非只看長度：中文資訊密度高，用長度當門檻會把
+    「正文有數值、只是附帶提到某項查無資料」的正常答案誤判成失敗。
+    真正放棄的答案是以「查無相關資料」開場的。
+    """
+    if not text or not text.strip():
+        return True
+    head = text.strip()[:60]
+    return bool(_NO_ANSWER_RE.search(head))
+
 
 def _wants_values(question: str) -> bool:
     return bool(_WANTS_VALUE_RE.search(question or ""))
@@ -1031,11 +1051,21 @@ def run_agent(
 
     # 充足性檢查（確定性，不靠 LLM）：合成不出，或「迴圈完全沒撈到 KG 關聯且 seed 向量信心偏低」
     # → 答案只靠弱向量證據，視為不足，自動補充一輪（更廣檢索 + 規範關聯展開）後重新合成。
-    weak = (synth is None) or (not kg_notes and seed_conf is not None and seed_conf < threshold)
+    # 也涵蓋「合成得出來、但內容是直接放棄」的情況：實測同一題有時第 1 步就回
+    # 「查無相關資料」，再問一次卻答得出來——差別只在該次 seed 檢索撈到不相關段落。
+    # 這種答案原本不算 weak（synth 不是 None、信心也可能過門檻），因此不會補查。
+    gave_up = _is_no_answer(synth or "")
+    weak = (
+        (synth is None)
+        or gave_up
+        or (not kg_notes and seed_conf is not None and seed_conf < threshold)
+    )
     if weak:
         try:
             yield {"type": "thought", "step": max_steps + 1,
-                   "text": "初次證據不足，自動補充一輪（更廣檢索＋規範關聯展開）後重新作答。"}
+                   "text": ("答案為「查無相關資料」，改以更廣檢索重試。"
+                            if gave_up else
+                            "初次證據不足，自動補充一輪（更廣檢索＋規範關聯展開）後重新作答。")}
             # (1) 更廣的檢索（提高 top_k），去重併入既有證據
             more, _ = _seed_evidence_via_rag(db, question, top_k=10)
             seen = {(e.get("document_id"), e.get("page"),

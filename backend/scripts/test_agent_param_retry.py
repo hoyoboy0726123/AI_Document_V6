@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, ".")
 
 from app.services.agent import (  # noqa: E402
-    _extract_param_terms, _lacks_values, _wants_values,
+    _extract_param_terms, _is_no_answer, _lacks_values, _wants_values,
 )
 
 results: list[tuple[str, bool]] = []
@@ -63,6 +63,18 @@ def main() -> None:
     check("抽得到參數名稱", len(terms) >= 2, f"→ {terms}")
     check("抽出的是英文術語（與語料語言一致）",
           all(any(c.isascii() and c.isalpha() for c in t) for t in terms) if terms else False)
+
+    # 3.5) 「直接放棄」的答案要被抓到（實測 agent 有時第 1 步就回查無相關資料）
+    check("查無相關資料判為放棄", _is_no_answer("查無相關資料。\n參考來源：\n* [來源1]") is True)
+    check("空答案判為放棄", _is_no_answer("") is True)
+    check("正常答案不誤判為放棄", _is_no_answer(GOOD_ANSWER) is False)
+    long_with_phrase = (
+        "震動測試條件如下：頻率準確度 ±0.5 Hz（5 Hz 至 50 Hz）、±2 Hz（50 至 500 Hz），"
+        "持續時間準確度為指定時間的 ±3%。隨機震動的頻率準確度維持在濾波器解析度的一半。"
+        "另關於發火裝置的長期老化資料，本文件查無相關資料，需另行查閱其他規範。"
+    )
+    check("長答案中提到「查無」不整篇誤判", _is_no_answer(long_with_phrase) is False,
+          "（僅短且放棄的答案才算）")
 
     # 4) 整體觸發條件
     trigger = _wants_values("鹽霧測試的測試條件") and _lacks_values(VAGUE_ANSWER)
