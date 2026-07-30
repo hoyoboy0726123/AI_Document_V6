@@ -1294,4 +1294,30 @@ def run_agent(
     # else：有證據但合成不出 → 保留 ReAct 迴圈自己的 final_text。
     # （section_lookup 命中時已在上方以確定性優先作答並 return，這裡不再附加。）
 
+    # 最後一道:不論放棄來自 ReAct 迴圈或合成結果，只要手上有檢索到的段落，
+    # 就不要交出一句「查無相關資料」。
+    #
+    # 實測「振動測試的測試條件」同一題有時第 1 步就放棄、再問一次卻答得出來，
+    # 差別只在該次 seed 撈到目錄頁。先前的偵測只檢查 synth，抓不到「迴圈自己放棄」
+    # 以及「合成結果本身就是那句放棄」兩種情況。改以低信心方式列出最接近的段落
+    # 並給查詢建議 —— 使用者至少知道系統看到了什麼、下一步該怎麼問。
+    if _is_no_answer(final_text):
+        pool = rag_evidence or seeded
+        if pool:
+            yield {"type": "thought", "step": max_steps + 4,
+                   "text": "答案為查無資料，但檢索確實有命中段落 → 改以低信心方式列出最接近的內容。"}
+            closest = [{"title": ev.get("title"), "page": ev.get("page"),
+                        "text": ev.get("snippet")} for ev in pool[:3]]
+            try:
+                alt = ai.low_confidence_answer(question, closest)
+                if alt and alt.strip():
+                    final_text = alt.strip()
+                    final_sources = [
+                        {"document_id": ev.get("document_id"), "title": ev.get("title"),
+                         "page": ev.get("page"), "snippet": ev.get("snippet"),
+                         "score": ev.get("score")} for ev in pool[:5]
+                    ]
+            except Exception as e:  # noqa: BLE001
+                logger.warning("final give-up rescue failed: %s", e)
+
     yield {"type": "final", "text": final_text, "sources": final_sources}

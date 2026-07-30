@@ -735,14 +735,28 @@ def analyze_pdf_page_images_singleturn(
     return _chat_with_ollama(
         messages,
         model=settings.OLLAMA_VISION_MODEL or settings.OLLAMA_LLM_MODEL,
-        options={"num_ctx": _vl_num_ctx(len(images))},
+        options={"num_ctx": _vl_num_ctx(len(images), len(system_rules) + len(composed))},
     )
 
 
-def _vl_num_ctx(n_images: int) -> int:
-    """VL 多頁分析需要動態加大 context：每頁圖約 1100~1300 tokens，10 頁可達 ~11k，
-    若只用預設 8192 會 exceed_context_size。依圖片數放大（含答案生成餘裕），上限 32768。"""
-    need = 4096 + n_images * 1300
+# 保留給答案生成的 token 額度。VL 的整頁分析動輒 2000-3000 token，
+# 若只算輸入就把 num_ctx 用滿，答案會在句子中間被截斷（done_reason=length）。
+_VL_OUTPUT_RESERVE = 4096
+
+
+def _vl_num_ctx(n_images: int, text_len: int = 0) -> int:
+    """VL 分析所需的 context 大小。
+
+    每頁圖約 1100~1300 tokens（實測 10 張圖 = 10,426），只用預設 8192 會 exceed_context_size。
+
+    text_len 是「提示詞 + 對話歷史」的字元數，必須一起算進來:
+    舊版只依圖片數估算，追問時端點會把最近 3 輪的「完整答案」塞進上下文，
+    實測 10 張圖 + 約 6,600 字歷史 = 輸入 16,019 tokens，num_ctx 只有 17,096，
+    留給輸出僅約 1,100 → done_reason=length，答案在句子中間斷掉。
+    這裡改為「圖片 + 文字 + 固定輸出額度」，並保留 _VL_OUTPUT_RESERVE 給生成。
+    """
+    # 中英混雜文字保守以 ~2 字元/token 估算
+    need = n_images * 1300 + max(0, text_len) // 2 + _VL_OUTPUT_RESERVE
     return min(32768, max(settings.OLLAMA_NUM_CTX, need))
 
 
@@ -883,7 +897,9 @@ def analyze_pdf_page_images_stream(
     for delta in client.chat_stream(
         messages,
         model=vl_model,
-        options={"num_ctx": _vl_num_ctx(len(images))},
+        # 把提示詞與對話歷史的長度一起算進來:追問時端點會塞入最近 3 輪的完整答案，
+        # 只依圖片數估算會讓輸出額度被吃光，答案在句子中間被截斷。
+        options={"num_ctx": _vl_num_ctx(len(images), len(system_rules) + len(composed))},
     ):
         yield delta
 
