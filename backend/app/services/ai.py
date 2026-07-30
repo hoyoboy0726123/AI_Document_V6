@@ -699,9 +699,7 @@ def analyze_pdf_page_images_singleturn(
     user_prompt = (question or "Summarize the key points from these pages.").strip()
 
     # Build short textual history (last 3 turns) and concise system rules
-    history_text = "\n".join(
-        f"Q: {turn.get('question','')}\nA: {turn.get('answer','')}\n" for turn in (conversation_history or [])[-3:]
-    )
+    history_text = _compact_vl_history(conversation_history)
 
     system_rules = (
         "您是專業的文件分析助理，請使用流暢自然的繁體中文（台灣）回答。\n"
@@ -743,6 +741,28 @@ def analyze_pdf_page_images_singleturn(
 # 若只算輸入就把 num_ctx 用滿，答案會在句子中間被截斷（done_reason=length）。
 _VL_OUTPUT_RESERVE = 4096
 
+# 追問時帶入的歷史上限。舊版塞入最近 3 輪的「完整答案」，而整頁分析的答案動輒
+# 3,000 字，三輪就約 6,600 字（約 5,600 tokens），把輸出額度吃光。
+# 歷史的用途只是讓模型知道「剛才在談什麼」，不需要逐字重述前一次的完整報告。
+_VL_HISTORY_TURNS = 2
+_VL_HISTORY_ANSWER_CHARS = 600
+
+
+def _compact_vl_history(conversation_history: Optional[List[Dict[str, str]]]) -> str:
+    """把追問要用的對話歷史壓到夠用就好。
+
+    只取最近 N 輪，且每輪答案截斷到 _VL_HISTORY_ANSWER_CHARS。
+    圖片一律不重複帶入（本來就只送當次選取的頁面），這裡處理的純粹是文字膨脹。
+    """
+    parts: List[str] = []
+    for turn in (conversation_history or [])[-_VL_HISTORY_TURNS:]:
+        q = str(turn.get("question") or "").strip()
+        a = str(turn.get("answer") or "").strip()
+        if len(a) > _VL_HISTORY_ANSWER_CHARS:
+            a = a[:_VL_HISTORY_ANSWER_CHARS] + "…（前次回答已截斷，僅供銜接語境）"
+        parts.append(f"Q: {q}\nA: {a}\n")
+    return "\n".join(parts)
+
 
 def _vl_num_ctx(n_images: int, text_len: int = 0) -> int:
     """VL 分析所需的 context 大小。
@@ -781,9 +801,7 @@ def analyze_pdf_page_images_stream(
     has_question = bool(question and question.strip())
     user_prompt = question.strip() if has_question else None
 
-    history_text = "\n".join(
-        f"Q: {turn.get('question','')}\nA: {turn.get('answer','')}\n" for turn in (conversation_history or [])[-3:]
-    )
+    history_text = _compact_vl_history(conversation_history)
 
     # 依「使用者目的」切換系統規則。判別依據是 conversation_history 是否為空：
     # 前端「分析本頁」固定傳 []，「追問」才會帶歷史（PdfPreviewModal.jsx）。
