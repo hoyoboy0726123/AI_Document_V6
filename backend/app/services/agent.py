@@ -134,6 +134,21 @@ def _lacks_subject(question: str) -> bool:
     return not bool(_SUBJECT_RE.search(question or ""))
 
 
+def _history_subject(conversation_history: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """從最近的對話取出查詢對象，供「主體省略型追問」繼承。
+
+    例:上一輪問「振動測試的測試條件」，這一輪只說「找出測試條件」——
+    使用者顯然還在談振動測試，應該繼承主體去查，而不是反問或回查無資料。
+    優先取使用者自己的提問（比答案更能代表意圖）。
+    """
+    for turn in reversed((conversation_history or [])[-3:]):
+        for field in ("question", "answer"):
+            m = _SUBJECT_RE.search(str(turn.get(field) or "")[:300])
+            if m:
+                return m.group(0)
+    return None
+
+
 def _clarify_scope_text(db: Session, question: str) -> str:
     """問題缺少查詢對象時的反問內容。
 
@@ -740,15 +755,19 @@ def run_agent(
     #   (b) 走結構工具列出 30 個方法後提早 return，耗掉 9-14 步才給一份清單
     # 兩者都不如一開始就問清楚，而且省下整輪模型呼叫。
     # 對話歷史已指明對象時（例如上一輪在談振動測試）視為有主體，不重複反問。
-    _hist_has_subject = any(
-        not _lacks_subject(f"{t.get('question','')} {str(t.get('answer',''))[:200]}")
-        for t in (conversation_history or [])[-2:]
-    )
-    if _lacks_subject(question) and _wants_values(question) and not _hist_has_subject:
-        yield {"type": "thought", "step": 0,
-               "text": "問題未指名測試類型，先反問以縮小範圍（避免任意挑一項測試作答）。"}
-        yield {"type": "final", "text": _clarify_scope_text(db, question), "sources": []}
-        return
+    if _lacks_subject(question) and _wants_values(question):
+        inherited = _history_subject(conversation_history)
+        if inherited:
+            # 主體省略型追問:繼承上一輪的對象去查，而不是反問或放棄。
+            # 先前只是「跳過反問」但沒把主體帶進檢索，結果落到「查無相關資料」——兩頭落空。
+            question = f"{inherited}的{question}"
+            yield {"type": "thought", "step": 0,
+                   "text": f"問題未指名對象，沿用上一輪的「{inherited}」繼續查：{question}"}
+        else:
+            yield {"type": "thought", "step": 0,
+                   "text": "問題未指名測試類型，先反問以縮小範圍（避免任意挑一項測試作答）。"}
+            yield {"type": "final", "text": _clarify_scope_text(db, question), "sources": []}
+            return
 
     # 純列舉題（「有哪些子項目 / 列出全部」且非規格/判定/目的等細節面向）→ 直接用 KG 確定性完整列舉。
     # 不走下方 _structural_evidence 的 grounded 合成：合成受 num_ctx 預算限制會漏項（6 子項只展開 2 個）。

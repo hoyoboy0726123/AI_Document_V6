@@ -10,7 +10,8 @@ import sys
 sys.path.insert(0, ".")
 
 from app.services.agent import (  # noqa: E402
-    _extract_param_terms, _is_no_answer, _lacks_subject, _lacks_values, _wants_values,
+    _extract_param_terms, _history_subject, _is_no_answer, _lacks_subject,
+    _lacks_values, _wants_values,
 )
 
 results: list[tuple[str, bool]] = []
@@ -103,6 +104,16 @@ def main() -> None:
         ("Method 514 的條件", False),
     ]:
         check(f"是否該反問：{q[:16]}", clarifies(q) is want, f"→ {clarifies(q)}")
+
+    # 3.7) 主體省略型追問要繼承上一輪的對象（而非反問或放棄）
+    hist = [{"question": "振動測試的測試條件", "answer": "頻率準確度 ±0.5 Hz…"}]
+    check("從歷史繼承主體", _history_subject(hist) in ("振動", "振動測試"),
+          f"→ {_history_subject(hist)}")
+    check("歷史無主體時回 None", _history_subject(
+        [{"question": "這份文件多長", "answer": "約 1089 頁"}]) is None)
+    check("無歷史時回 None", _history_subject(None) is None)
+    check("繼承後的查詢含主體",
+          not _lacks_subject(f"{_history_subject(hist)}的找出測試條件"))
 
     # 4) 整體觸發條件
     trigger = _wants_values("鹽霧測試的測試條件") and _lacks_values(VAGUE_ANSWER)
