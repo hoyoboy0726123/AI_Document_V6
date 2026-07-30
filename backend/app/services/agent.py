@@ -91,7 +91,10 @@ _PARAM_RETRY_MAX = 2
 
 # 問題在要具體條件/數值
 _WANTS_VALUE_RE = re.compile(
-    r"條件|參數|規格|多少|數值|幾度|幾小時|溫度|濕度|濃度|時間|速率|流速|公差|範圍|限值|要求|標準值"
+    # 「範圍」不能單獨算：中文的「文件的範圍」是 scope、不是數值區間，
+    # 只有跟可量測的量搭配（溫度範圍、頻率範圍…）才視為在問數值。
+    r"條件|參數|規格|多少|數值|幾度|幾小時|溫度|濕度|濃度|時間|速率|流速|公差|限值|標準值"
+    r"|(?:溫度|濕度|頻率|壓力|加速度|時間|電壓|電流)\s*範圍"
     # 英文問法用寬鬆比對：「what is the salt concentration」中間會夾字，
     # 寫成 what\s+(concentration) 會漏掉。
     r"|how\s+(much|long|many)"
@@ -114,6 +117,54 @@ _NO_ANSWER_RE = re.compile(
     r"查無相關資料|查無資料|沒有找到|無法回答|找不到.{0,6}(資料|內容)|no relevant|not found",
     re.I,
 )
+
+
+# 問題是否指名了查詢對象。缺少對象時（例如只說「找出測試條件」），
+# 語料裡 20 幾種測試方法各有自己的條件，任何答案都是任意挑的 —— 應該反問而非放棄。
+_SUBJECT_RE = re.compile(
+    r"MIL-STD|MIL-DTL|MIL-PRF|MIL-HDBK|ISO|IEC|IEEE|ASTM|Method\s*\d|方法\s*\d|\d{3}\.\d"
+    r"|高溫|低溫|溫度衝擊|濕度|鹽霧|砂塵|沙塵|振動|震動|衝擊|加速度|太陽|輻射|黴菌|真菌"
+    r"|淋雨|降雨|低壓|高度|爆炸|酸性|結冰|凍雨|運輸|噪音|彈跳|落下|傾斜",
+    re.I,
+)
+
+
+def _lacks_subject(question: str) -> bool:
+    """問題是否沒有指名查詢對象（測試類型、規範編號、方法號）。"""
+    return not bool(_SUBJECT_RE.search(question or ""))
+
+
+def _clarify_scope_text(db: Session, question: str) -> str:
+    """問題缺少查詢對象時的反問內容。
+
+    子項目清單直接取自 KG（list_subitems），不寫死方法名稱，換語料也適用。
+    """
+    options: List[str] = []
+    try:
+        obs = agent_tools.run_tool(db, "list_subitems", {"name": "MIL-STD-810H"})
+        if isinstance(obs, dict):
+            for it in (obs.get("subitems") or [])[:12]:
+                label = str(it.get("name") or it.get("canonical_id") or "").strip()
+                if label:
+                    options.append(label)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("clarify list_subitems failed: %s", e)
+
+    lines = [
+        "你的問題沒有指定要查哪一項測試，我需要先確認範圍再查，否則只能任意挑一項給你。",
+        "",
+        "這批文件涵蓋多種測試方法，每一種都有各自的條件與數值。",
+    ]
+    if options:
+        lines += ["", "可選的項目（節錄）："] + [f"- {o}" for o in options]
+    lines += [
+        "",
+        "請補上測試類型或規範編號，例如：",
+        "- 振動測試（Method 514）的測試條件是什麼",
+        "- 鹽霧測試的鹽溶液濃度與 pH 要求",
+        "- 低溫測試的溫度與持續時間",
+    ]
+    return "\n".join(lines)
 
 
 def _is_no_answer(text: str) -> bool:
@@ -681,6 +732,24 @@ def run_agent(
       {"type": "final", "text": str}
       {"type": "error", "message": str}
     """
+    # 問題沒指名對象卻在要具體數值 → 先反問，不要硬答（agent 的互動價值）。
+    #
+    # 放在最前面而非流程末端的原因:語料有 20 幾種測試方法，各有自己的條件，
+    # 「找出測試條件」本質上無解。實測讓它跑下去會出現兩種壞結果：
+    #   (a) 隨機挑一項測試（曾挑到彈道衝擊）回答得像真的 —— 使用者看不出挑錯對象
+    #   (b) 走結構工具列出 30 個方法後提早 return，耗掉 9-14 步才給一份清單
+    # 兩者都不如一開始就問清楚，而且省下整輪模型呼叫。
+    # 對話歷史已指明對象時（例如上一輪在談振動測試）視為有主體，不重複反問。
+    _hist_has_subject = any(
+        not _lacks_subject(f"{t.get('question','')} {str(t.get('answer',''))[:200]}")
+        for t in (conversation_history or [])[-2:]
+    )
+    if _lacks_subject(question) and _wants_values(question) and not _hist_has_subject:
+        yield {"type": "thought", "step": 0,
+               "text": "問題未指名測試類型，先反問以縮小範圍（避免任意挑一項測試作答）。"}
+        yield {"type": "final", "text": _clarify_scope_text(db, question), "sources": []}
+        return
+
     # 純列舉題（「有哪些子項目 / 列出全部」且非規格/判定/目的等細節面向）→ 直接用 KG 確定性完整列舉。
     # 不走下方 _structural_evidence 的 grounded 合成：合成受 num_ctx 預算限制會漏項（6 子項只展開 2 個）。
     # Audit C6：補上 relation/app guard（與迴圈後方 834/794 行一致）。

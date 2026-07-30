@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, ".")
 
 from app.services.agent import (  # noqa: E402
-    _extract_param_terms, _is_no_answer, _lacks_values, _wants_values,
+    _extract_param_terms, _is_no_answer, _lacks_subject, _lacks_values, _wants_values,
 )
 
 results: list[tuple[str, bool]] = []
@@ -75,6 +75,34 @@ def main() -> None:
     )
     check("長答案中提到「查無」不整篇誤判", _is_no_answer(long_with_phrase) is False,
           "（僅短且放棄的答案才算）")
+
+    # 3.6) 問題有沒有指名對象（決定是否改用反問）
+    for q, want in [
+        ("找出測試條件", True),
+        ("測試條件是什麼", True),
+        ("請問參數", True),
+        ("震動測試的測試條件", False),
+        ("鹽霧測試方法", False),
+        ("MIL-STD-810H 有哪些程序", False),
+        ("Method 514 的條件", False),
+        ("低溫測試要幾度", False),
+    ]:
+        check(f"缺主體判斷：{q[:16]}", _lacks_subject(q) is want, f"→ {_lacks_subject(q)}")
+
+    # 反問條件 = 缺主體 且 在要數值（不看模型有沒有勉強生出答案：
+    # 實測它會隨機挑一項測試回答得像真的，那比誠實說查不到更危險）
+    def clarifies(q: str) -> bool:
+        return _lacks_subject(q) and _wants_values(q)
+
+    for q, want in [
+        ("找出測試條件", True),
+        ("測試參數是多少", True),
+        ("震動測試的測試條件", False),   # 有主體
+        ("有哪些測試方法", False),        # 缺主體但不是在要數值
+        ("這份文件的範圍是什麼", False),  # 同上
+        ("Method 514 的條件", False),
+    ]:
+        check(f"是否該反問：{q[:16]}", clarifies(q) is want, f"→ {clarifies(q)}")
 
     # 4) 整體觸發條件
     trigger = _wants_values("鹽霧測試的測試條件") and _lacks_values(VAGUE_ANSWER)
