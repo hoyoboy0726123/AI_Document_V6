@@ -87,19 +87,25 @@ Max {max_steps} steps. After that, you MUST emit final_answer."""
 
 
 # ── 參數題補救：判斷「使用者要數值」與「答案沒給數值」───────────────────────
-_PARAM_RETRY_MAX = 2
+# 補救輪數。實測使用者需要追問 2-3 次才拿到數值，那些輪次本來就該由 agent 自己跑完。
+_PARAM_RETRY_MAX = 3
 
 # 問題在要具體條件/數值
 _WANTS_VALUE_RE = re.compile(
-    # 「範圍」不能單獨算：中文的「文件的範圍」是 scope、不是數值區間，
-    # 只有跟可量測的量搭配（溫度範圍、頻率範圍…）才視為在問數值。
-    r"條件|參數|規格|多少|數值|幾度|幾小時|溫度|濕度|濃度|時間|速率|流速|公差|限值|標準值"
-    r"|(?:溫度|濕度|頻率|壓力|加速度|時間|電壓|電流)\s*範圍"
-    # 英文問法用寬鬆比對：「what is the salt concentration」中間會夾字，
-    # 寫成 what\s+(concentration) 會漏掉。
+    # 只認「明確索取數值」的線索。
+    #
+    # 不能把「溫度 / 濕度」這類詞單獨列入 —— 它們同時是測試項目的名稱，
+    # 「濕度測試的目的是什麼」也會命中，於是純敘述的答案（本來就不該有數值）
+    # 被判為不足，白跑 3 輪補救。要求它們與索取字樣搭配才算。
+    #
+    # 「範圍」同理有兩義:「溫度範圍」是數值區間、「文件的範圍」是 scope。
+    r"條件|參數|規格|多少|數值|幾度|幾小時|幾分鐘|公差|限值|標準值|門檻"
+    r"|(?:溫度|濕度|濃度|頻率|壓力|加速度|時間|速率|流速|電壓|電流)"
+    r"\s*(?:是多少|要求|條件|範圍|值|規定|上限|下限)"
+    # 英文問法用寬鬆比對：「what is the salt concentration」中間會夾字。
     r"|how\s+(much|long|many)"
     r"|what.{0,24}(value|temperature|concentration|rate|duration|limit|tolerance|pressure)"
-    r"|parameter|condition|requirement",
+    r"|parameter|condition|requirement|tolerance|threshold",
     re.I,
 )
 # 帶單位的具體數值（規範常用單位）
@@ -108,8 +114,34 @@ _VALUE_TOKEN_RE = re.compile(
     r"|mm|cm|inch|英寸|小時|分鐘|秒|天|hours?|minutes?|days?)",
     re.I,
 )
-# 「沒給數值」的典型措辭
-_VAGUE_RE = re.compile(r"需(根據|依|在).{0,12}(指定|規定|設定)|需明確規定|由測試計畫|依測試計畫|未明確")
+# 「沒給數值」的典型措辭。實測補上原本漏掉的講法:
+# 「需根據運輸、儲存與部署時的氣候…來確定」（需/應 與 確定 之間可以很長）、
+# 「應選取最壞情況」、「可參考表 507.6-I」（只指路不給值）、「視情況而定」。
+_VAGUE_RE = re.compile(
+    r"需(根據|依|在).{0,30}?(指定|規定|設定|確定|決定)"
+    r"|[應需].{0,20}?選(取|擇).{0,10}(最壞|適當|合適)"
+    r"|[可請]參考表|詳見表|見表\s*[\d.]"
+    r"|視.{0,8}而定|依.{0,8}而定"
+    r"|需明確規定|由測試計畫|依測試計畫|未明確|未提供具體"
+)
+
+# 同一句話被重複貼上多次 —— 實測「我要測試條件」的答案把同一句
+# 「需根據運輸、儲存與部署…最壞情況」重複了 5 次，這種答案對使用者毫無價值。
+_MIN_REPEAT_LEN = 24
+_MAX_REPEAT_TIMES = 2
+
+
+def _has_heavy_repetition(answer: str) -> bool:
+    """答案是否大量重複同一段長句。"""
+    lines = [re.sub(r"\s+", "", ln) for ln in (answer or "").splitlines()]
+    seen: Dict[str, int] = {}
+    for ln in lines:
+        ln = re.sub(r"\[來源\d+\]", "", ln)
+        if len(ln) >= _MIN_REPEAT_LEN:
+            seen[ln] = seen.get(ln, 0) + 1
+            if seen[ln] > _MAX_REPEAT_TIMES:
+                return True
+    return False
 
 # 直接放棄的答案。實測 agent 有時在第 1 步就交出「查無相關資料」——
 # 明明語料裡有（同一題再問一次就答得出來），只是 seed 檢索該次撈到不相關的段落。
@@ -195,40 +227,110 @@ def _is_no_answer(text: str) -> bool:
     return bool(_NO_ANSWER_RE.search(head))
 
 
+# 「怎麼做」型問句。在測試規範的語境下，問某項測試的方法/程序/步驟等同於在要參數——
+# 一份沒有溫度、濕度、持續時間的「測試方法」是無法執行的。實測使用者正是從
+# 「濕度測試方法」問起，拿到一段只講 Procedure I/II 名稱、零數值的敘述，才被迫追問。
+_HOWTO_RE = re.compile(
+    r"測試方法|方法|程序|步驟|怎麼(做|測|進行|執行)|如何(做|測|進行|執行)|procedure|how\s+to",
+    re.I,
+)
+# 目的／適用範圍題：這類問題的正確答案本來就沒有數值，不可因為「零數值」而深查。
+_PURPOSE_RE = re.compile(
+    r"目的|用途|適用|不適用|為什麼|為何|定義|意義|purpose|scope|why|definition",
+    re.I,
+)
+
+
 def _wants_values(question: str) -> bool:
-    return bool(_WANTS_VALUE_RE.search(question or ""))
+    q = question or ""
+    # 明確索取數值的線索優先於任何否決：「溫度範圍是多少」含「範圍」，
+    # 但它問的是數值區間，不是文件的 scope。
+    if _WANTS_VALUE_RE.search(q):
+        return True
+    if _PURPOSE_RE.search(q) or re.search(r"(?<![溫濕濃頻壓時速電])範圍", q):
+        return False
+    # 關係題（「哪些方法引用了 X」）與列舉題（「有哪些測試方法」）都含「方法」二字，
+    # 但它們走 KG 確定性路徑，答案是清單而非數值 —— 補救迴圈與反問對它們都沒有意義。
+    if _RELATION_RE.search(q) or _ENUM_STRUCT_RE.search(q):
+        return False
+    return bool(_HOWTO_RE.search(q))
 
 
 def _lacks_values(answer: str) -> bool:
-    """答案是否缺乏具體數值。
+    """答案是否缺乏具體數值（僅在 _wants_values 成立時才會被問到）。
 
-    判準刻意保守：不是「完全沒數字」就算不足，而是「數值很少且充斥空話」——
-    避免把本來就沒有數值的題型（如適用範圍、測試目的）也拖進補救迴圈。
+    原本要求「數值 <=2 且空話 >=2」兩個條件同時成立，實測漏掉最該抓的案例:
+    「我要測試條件」的答案「一個帶單位的數值都沒有」，卻因為空話正則沒涵蓋
+    當時的措辭（需根據…來確定 / 應選取最壞情況 / 可參考表 507.6-I）而被判為足夠。
+    使用者明確在要數值、答案卻完全沒有數值，這本身就足以判定不足，不需要佐證。
     """
     if not answer:
         return True
     n_values = len(set(_VALUE_TOKEN_RE.findall(answer)))
+    if n_values == 0:
+        return True
+    if _has_heavy_repetition(answer):
+        return True
     n_vague = len(_VAGUE_RE.findall(answer))
     return n_values <= 2 and n_vague >= 2
 
 
-def _extract_param_terms(evidence: List[Dict[str, Any]], answer: str) -> List[str]:
-    """從證據與答案中撈出「參數名稱」當作下一輪查詢關鍵字。
+def _is_degenerate(answer: str) -> bool:
+    """答案是否「明顯沒有交代任何實質內容」，與問題怎麼問無關。
 
-    規範的 INFORMATION REQUIRED 章節會逐條列出參數名稱，例如
-    "(a) Salt solution pH. (b) Salt solution fallout rate (ml/cm2/hr)."
-    這些名稱正是找實際數值最好的查詢種子（且為英文，與語料語言一致）。
+    為什麼需要這一關：`_wants_values` 只認明確索取數值的措辭，
+    但實測使用者是從「濕度測試方法」開始問的 —— 那句不算在要數值，
+    可是模型交回的答案零數值、同一句重複 5 次、通篇「需依…而定」。
+    這種答案無論問題意圖如何都該自己再查一輪，不該讓使用者追問。
+
+    門檻刻意比 `_lacks_values` 嚴（要同時滿足零數值 + 空話/重複），
+    否則「本方法的目的與適用範圍」這類本來就沒有數值的正常答案會被誤判。
+    """
+    if not answer:
+        return False  # 空答案走 `_is_no_answer` 的放棄補救路徑
+    if len(set(_VALUE_TOKEN_RE.findall(answer))) > 0:
+        return False
+    return _has_heavy_repetition(answer) or len(_VAGUE_RE.findall(answer)) >= 2
+
+
+# 規範裡「需參照表 X」「見 Cycle B1」這類措辭，本身就標示了數值的所在地。
+_TABLE_REF_RE = re.compile(r"(?:table|表)\s*(\d{3}\.\d+-[IVX]+\b|\d{3}\.\d+-\d+\b)", re.I)
+_CYCLE_REF_RE = re.compile(r"\b(cycle\s+[A-C]\d?)\b", re.I)
+
+
+def _extract_param_terms(evidence: List[Dict[str, Any]], answer: str) -> List[str]:
+    """從證據與答案中撈出下一輪查詢的種子關鍵字。
+
+    優先序有講究：
+      1. 表號（Table 507.6-I）與循環代號（Cycle B1）—— 規範說「條件見表 X」時，
+         數值就在那張表所屬的段落。實測這是唯一能把 66ºC / 71ºC 撈出來的路徑。
+      2. INFORMATION REQUIRED 章節的條列參數名稱，例如
+         "(a) Salt solution pH. (b) Salt solution fallout rate (ml/cm2/hr)."
+
+    先前只有第 2 項，結果在濕度題撈到的是「Presence of free water」這類
+    「濕度造成的影響」清單 —— 那是現象描述，不是數值所在地，重查等於白跑。
     """
     blob = " ".join(
         (e.get("snippet") or e.get("text") or "") for e in evidence
     ) + " " + (answer or "")
     terms: List[str] = []
+
+    def _add(t: str) -> None:
+        t = re.sub(r"\s+", " ", t).strip(" .")
+        if t and t.lower() not in {x.lower() for x in terms}:
+            terms.append(t)
+
+    for m in _TABLE_REF_RE.finditer(blob):
+        _add(f"Table {m.group(1).upper()}")
+    for m in _CYCLE_REF_RE.finditer(blob):
+        _add(m.group(1).title())
+
     # (a) Xxx yyy.  /  (1) Xxx yyy.  形式的條列項目
     # 字元類要含數字，否則 "Salt solution fallout rate (ml/cm2/hr)" 會被切斷而漏掉
     for m in re.finditer(r"\([a-z0-9]\)\s*([A-Z][A-Za-z0-9 /()\-]{6,60}?)\s*[.\n]", blob):
         t = re.sub(r"\s+", " ", m.group(1)).strip(" .")
-        if 6 <= len(t) <= 60 and t.lower() not in [x.lower() for x in terms]:
-            terms.append(t)
+        if 6 <= len(t) <= 60:
+            _add(t)
     return terms[:6]
 
 
@@ -274,7 +376,74 @@ def _build_history_messages(conversation_history: List[Dict[str, Any]]) -> List[
     return msgs
 
 
+def _needs_deeper_search(question: str, answer: str) -> bool:
+    """答案是否還不足以交給使用者（兩條路徑，見 `_wants_values` / `_is_degenerate`）。"""
+    if not answer:
+        return False
+    return (_wants_values(question) and _lacks_values(answer)) or _is_degenerate(answer)
+
+
 def _grounded_synthesis(
+    db: Session,
+    question: str,
+    rag_evidence: List[Dict[str, Any]],
+    kg_notes: List[str],
+    conversation_history: Optional[List[Dict[str, Any]]],
+    *,
+    ensure_values: bool = True,
+) -> tuple:
+    """外層包裝：合成一次，若答案缺數值就自己補查再合成，直到夠用或試完。
+
+    為什麼放在這裡而不是流程末端：`run_agent` 有 9 個「產出最終答案」的出口，
+    其中 8 個會提早 return，繞過末端的補救迴圈。實測同一個問題在不同輪次會走到
+    不同出口（LLM 每次挑的工具不同），於是「有時會自己深查、有時不會」。
+    所有出口的內容答案都出自這個函式，把補救放進來才是唯一覆蓋得完的位置。
+
+    `ensure_values=False` 供內部輔助呼叫使用（子問題拆解、摘要生成）——
+    那些不是要交給使用者的最終答案，不值得多花幾輪檢索。
+    """
+    ans, sources, n_used, n_total = _synthesize_grounded(
+        db, question, rag_evidence, kg_notes, conversation_history)
+    if not ensure_values:
+        return ans, sources, n_used, n_total
+
+    evidence = list(rag_evidence)
+    for _ in range(_PARAM_RETRY_MAX):
+        if not _needs_deeper_search(question, ans):
+            break
+        terms = _extract_param_terms(evidence, ans)
+        if not terms:
+            break
+        seen = {(e.get("document_id"), e.get("page"),
+                 (e.get("snippet") or e.get("text") or "")[:48]) for e in evidence}
+        fresh: List[Dict[str, Any]] = []
+        for term in terms[:4]:
+            try:
+                more, _ = _seed_evidence_via_rag(db, f"{term} value requirement", top_k=5)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ensure_values 補查「%s」失敗: %s", term, e)
+                continue
+            for ev in more:
+                k = (ev.get("document_id"), ev.get("page"),
+                     (ev.get("snippet") or ev.get("text") or "")[:48])
+                if k not in seen:
+                    fresh.append(ev)
+                    seen.add(k)
+        if not fresh:
+            break
+        # 補回來的證據放最前面，且帶數值者優先 —— 合成受預算限制會截尾，
+        # 接在尾端等於白查（實測撈到了頁 212 的 66ºC/71ºC 卻被截掉）。
+        fresh.sort(key=lambda e: 0 if _VALUE_TOKEN_RE.search(
+            e.get("snippet") or e.get("text") or "") else 1)
+        evidence[:0] = fresh
+        new_ans, new_sources, new_used, new_total = _synthesize_grounded(
+            db, question, evidence, kg_notes, conversation_history)
+        if new_ans:
+            ans, sources, n_used, n_total = new_ans, new_sources, new_used, new_total
+    return ans, sources, n_used, n_total
+
+
+def _synthesize_grounded(
     db: Session,
     question: str,
     rag_evidence: List[Dict[str, Any]],
@@ -562,7 +731,8 @@ def _group_summary(db: Session, matched: str, conversation_history) -> str:
             f"請用 2~4 句話摘要說明「{matched}」這組測試整體在測試什麼、目的為何，"
             "以段落呈現；不要再列出子項目清單。"
         )
-        ans, _s, _u, _t = _grounded_synthesis(db, sq, ev, [], conversation_history)
+        ans, _s, _u, _t = _grounded_synthesis(db, sq, ev, [], conversation_history,
+                                              ensure_values=False)
         return ans.strip() if ans else ""
     except Exception as e:
         logger.warning("group summary failed: %s", e)
@@ -582,6 +752,11 @@ def _cap_clean(text: str, cap: int) -> str:
         if i > cap * 0.6:
             return cut[: i + len(sep)].rstrip()
     return cut.rstrip()
+
+
+# 結構路徑在「對象未被點名」時允許的子項數上限。810H 這種整份文件節點有 30 個方法，
+# 單一 Method 節點通常只有個位數程序 —— 用這個差距分辨「解析到容器」與「解析到方法」。
+_STRUCT_UNNAMED_ITEM_LIMIT = 8
 
 
 def _structural_evidence(db: Session, question: str, conversation_history) -> Optional[Dict[str, Any]]:
@@ -614,6 +789,19 @@ def _structural_evidence(db: Session, question: str, conversation_history) -> Op
 
     matched = det.get("matched")
     if not matched or not items:
+        return None
+
+    # 對象解析落到「整份文件」而非某個方法時的防呆。
+    #
+    # 實測「濕度的我要測試條件」被模糊比對成整份 MIL-STD-810H，於是把 30 個方法的
+    # 節錄全灌進脈絡，真正的濕度內容被稀釋，合成結果反而是「查無相關資料」。
+    # 判準與列舉題一致：看使用者有沒有點名這個容器。沒點名、子項又多、且不是
+    # 概覽/列舉題 → 視為解析錯誤，讓它走一般 RAG（那條路反而找得到正確段落）。
+    if (not is_overview and not is_enum
+            and len(items) >= _STRUCT_UNNAMED_ITEM_LIMIT
+            and str(matched).lower() not in (question or "").lower()):
+        logger.debug("structural evidence 放棄：對象「%s」未被點名且子項達 %d 個",
+                     matched, len(items))
         return None
 
     rag_evidence: List[Dict[str, Any]] = []
@@ -724,7 +912,8 @@ def _build_enumeration_answer(db: Session, chosen: Dict[str, Any], rag_evidence,
                 f"請用 2~4 句話摘要說明「{chosen['matched']}」這組測試整體在測試什麼、目的為何，"
                 "以段落呈現；不要再列出子項目清單。"
             )
-            s_ans, _s, _u, _t = _grounded_synthesis(db, sq, evidence_for_summary, [], conversation_history)
+            s_ans, _s, _u, _t = _grounded_synthesis(db, sq, evidence_for_summary, [],
+                                                    conversation_history, ensure_values=False)
             if s_ans and s_ans.strip():
                 body += f"\n\n📝 摘要說明：\n{s_ans.strip()}"
         except Exception as e:
@@ -760,7 +949,19 @@ def run_agent(
         if inherited:
             # 主體省略型追問:繼承上一輪的對象去查，而不是反問或放棄。
             # 先前只是「跳過反問」但沒把主體帶進檢索，結果落到「查無相關資料」——兩頭落空。
-            question = f"{inherited}的{question}"
+            #
+            # 拼接方式要讓結果是通順的查詢句。直接 f"{主體}的{原問題}" 會產生
+            # 「濕度的我要測試條件」，檢索出的是完全無關的段落（實測落到頁 159）。
+            # 先去掉「我要／請問」這類意圖前綴，再依剩下的字決定要不要加「的」。
+            # 實測各種拼法的檢索品質（top-6 落在 Method 507.6 頁碼區間、且帶表號的比例）：
+            #   「濕度的我要測試條件」  3/4，表號 1  ← 原本的拼法
+            #   「濕度測試條件」        3/6，表號 2  ← 只去前綴反而更差
+            #   「濕度測試的測試條件」  3/3，表號 3  ← 採用
+            # 表號（Table 507.6-I）是後續補查數值的種子來源，所以「帶表號」比通順更重要。
+            core = re.sub(r"^(我想|我要|請問|幫我|麻煩|想知道|找出|列出|請)+", "", question).strip()
+            core = core or question
+            base = inherited if inherited.endswith("測試") else f"{inherited}測試"
+            question = f"{base}的{core}"
             yield {"type": "thought", "step": 0,
                    "text": f"問題未指名對象，沿用上一輪的「{inherited}」繼續查：{question}"}
         else:
@@ -1073,18 +1274,25 @@ def run_agent(
             return
 
     # 列舉題：用 list_subitems 的權威完整清單作答（不經會漏項的 RAG 合成）。
+    #
+    # 前提是「使用者真的在要清單」。實測「濕度測試方法」被回了全部 30 個 Method 的列舉:
+    # LLM 探索途中順手呼叫了一次 list_subitems，下面的單一結果捷徑就無條件把它當成答案，
+    # 真正的內容被擠到附註。判斷列舉與否要看問題本身，不能看 LLM 剛好用了哪個工具。
+    #
+    # 「引用/取代/被…引用」這類關係題不算列舉（否則「MIL-DTL-901 被哪些 810H 方法引用」會被
+    # 誤判成「列 810H 的方法」）—— 交給後面的 section_lookup / 規範關係區塊處理。
+    is_enum_q = bool(_looks_like_enumeration(question)) and not _RELATION_RE.search(question)
     ql = question.lower()
     chosen = None
-    for sr in structural_results:
-        if (sr.get("matched") or "").lower() in ql and sr.get("subitems"):
-            chosen = sr
-            break
-    if chosen is None and len(structural_results) == 1 and structural_results[0].get("subitems"):
-        chosen = structural_results[0]
+    if is_enum_q:
+        for sr in structural_results:
+            if (sr.get("matched") or "").lower() in ql and sr.get("subitems"):
+                chosen = sr
+                break
+        if chosen is None and len(structural_results) == 1 and structural_results[0].get("subitems"):
+            chosen = structural_results[0]
     # 確定性 fallback：即使這一輪 LLM 沒呼叫 list_subitems，列舉題仍直接從問題字串解析實體並完整列舉。
-    # 但「引用/取代/被…引用」這類關係題不算列舉（否則「MIL-DTL-901 被哪些 810H 方法引用」會被
-    # 誤判成「列 810H 的方法」）—— 交給後面的 section_lookup / 規範關係區塊處理。
-    if chosen is None and _looks_like_enumeration(question) and not _RELATION_RE.search(question):
+    if chosen is None and is_enum_q:
         fb = agent_tools.run_tool(db, "list_subitems", {"name": question})
         if isinstance(fb, dict) and fb.get("subitems"):
             chosen = {
@@ -1249,7 +1457,14 @@ def run_agent(
     # 這裡改用可驗證的條件：問題在要數值 且 答案幾乎沒有帶單位的數字 → 視為未達成，
     # 用「證據裡出現的參數名稱」當新關鍵字再查一輪（那份清單本身就是最好的查詢種子）。
     for attempt in range(1, _PARAM_RETRY_MAX + 1):
-        if not (synth and _wants_values(question) and _lacks_values(synth)):
+        # 兩條觸發路徑：
+        #   1. 使用者明確在要數值，而答案缺數值
+        #   2. 問題沒明講要數值，但答案本身就是退化的（零數值 + 空話/重複）
+        insufficient = (
+            (_wants_values(question) and _lacks_values(synth))
+            or _is_degenerate(synth)
+        ) if synth else False
+        if not insufficient:
             break
         terms = _extract_param_terms(rag_evidence, synth)
         if not terms:
@@ -1258,7 +1473,7 @@ def run_agent(
                "text": f"答案只列出需指定的項目、沒有實際數值，改用參數名稱重查："
                        + "、".join(terms[:4])}
         try:
-            added = 0
+            fresh: List[Dict[str, Any]] = []
             seen = {(e.get("document_id"), e.get("page"),
                      (e.get("snippet") or e.get("text") or "")[:48]) for e in rag_evidence}
             for term in terms[:4]:
@@ -1267,11 +1482,19 @@ def run_agent(
                     k = (e.get("document_id"), e.get("page"),
                          (e.get("snippet") or e.get("text") or "")[:48])
                     if k not in seen:
-                        rag_evidence.append(e)
+                        fresh.append(e)
                         seen.add(k)
-                        added += 1
-            if not added:
+            if not fresh:
                 break
+            # 補回來的證據要放在「最前面」，不能 append 到尾端。
+            #
+            # 合成受脈絡預算限制，只吃得下前面若干段（實測有 14 段被截掉）。
+            # 這一輪是「為了補數值」而精準撈的，接在尾端等於必定被截掉 ——
+            # 檢索明明撈到了頁 212 的 66ºC / 71ºC，最終答案卻仍然一個數值都沒有。
+            # 帶數值的段落再優先於其餘補充，確保預算優先花在數值上。
+            fresh.sort(key=lambda e: 0 if _VALUE_TOKEN_RE.search(
+                e.get("snippet") or e.get("text") or "") else 1)
+            rag_evidence[:0] = fresh
             new_synth, new_sources, new_used = _synthesize()
             if new_synth:
                 synth, syn_sources, n_used = new_synth, new_sources, new_used

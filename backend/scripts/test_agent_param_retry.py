@@ -10,8 +10,8 @@ import sys
 sys.path.insert(0, ".")
 
 from app.services.agent import (  # noqa: E402
-    _extract_param_terms, _history_subject, _is_no_answer, _lacks_subject,
-    _lacks_values, _wants_values,
+    _extract_param_terms, _has_heavy_repetition, _history_subject, _is_degenerate,
+    _is_no_answer, _lacks_subject, _lacks_values, _wants_values,
 )
 
 results: list[tuple[str, bool]] = []
@@ -44,16 +44,26 @@ def main() -> None:
         ("沙塵測試的塵土濃度是多少", True),
         ("低溫測試的溫度要求", True),
         ("what is the salt concentration", True),
+        # 問「方法」在規範語境下等同要參數：一份沒有溫濕度與時間的測試方法無法執行
+        ("濕度測試方法", True),
         ("鹽霧測試的目的是什麼", False),
+        ("這份文件的適用範圍", False),
+        ("為什麼要做濕度測試", False),
+        # 關係題含「方法」二字，但走 KG 確定性路徑，深查數值無意義
         ("哪些方法引用了 MIL-STD-810H", False),
+        ("MIL-STD-810H 取代了哪些規範", False),
     ]:
         check(f"問題意圖：{q[:18]}", _wants_values(q) is want, f"→ {_wants_values(q)}")
 
     # 2) 答案是否缺數值
     check("空表格答案判為不足", _lacks_values(VAGUE_ANSWER) is True)
     check("含實際數值的答案判為足夠", _lacks_values(GOOD_ANSWER) is False)
-    check("敘述型答案不誤判", _lacks_values(NO_VALUE_TOPIC) is False,
-          "（無空話措辭，不該進補救迴圈）")
+    # 敘述型答案本身沒有數值，_lacks_values 會（刻意）回 True——
+    # 攔住誤觸發的是「問題有沒有在要數值」那一關，所以這裡驗組合條件。
+    check("敘述型答案：單看答案算不足", _lacks_values(NO_VALUE_TOPIC) is True)
+    check("敘述型答案不誤觸發補救迴圈",
+          (_wants_values("鹽霧測試的目的是什麼") and _lacks_values(NO_VALUE_TOPIC)) is False,
+          "（目的題不算在要數值 → 不進補救迴圈）")
     check("空答案判為不足", _lacks_values("") is True)
 
     # 3) 參數名稱抽取（下一輪查詢的種子）
@@ -115,11 +125,38 @@ def main() -> None:
     check("繼承後的查詢含主體",
           not _lacks_subject(f"{_history_subject(hist)}的找出測試條件"))
 
-    # 4) 整體觸發條件
-    trigger = _wants_values("鹽霧測試的測試條件") and _lacks_values(VAGUE_ANSWER)
-    check("該觸發時會觸發", trigger is True)
-    no_trigger = _wants_values("鹽霧測試的測試條件") and _lacks_values(GOOD_ANSWER)
-    check("已有數值時不重複查", no_trigger is False)
+    # 3.8) 實測踩到的案例:答案「一個數值都沒有」卻沒被判為不足
+    REAL_VAGUE = """根據可用段落，濕度測試的條件如下：
+濕度測試的條件與持續時間需根據運輸、儲存與部署時的氣候、持續時間及測試樣品配置來確定。測試條件應選取最壞情況作為選擇測試與條件的基礎。[來源2]
+濕度測試的條件與持續時間需根據運輸、儲存與部署時的氣候、持續時間及測試樣品配置來確定。測試條件應選取最壞情況作為選擇測試與條件的基礎。[來源2]
+濕度測試的條件可參考表 507.6-I，該表包含三個地理類別的溫度與相對濕度條件。
+濕度測試的條件與持續時間需根據運輸、儲存與部署時的氣候、持續時間及測試樣品配置來確定。測試條件應選取最壞情況作為選擇測試與條件的基礎。[來源2]"""
+    check("零數值答案判為不足（實測案例）", _lacks_values(REAL_VAGUE) is True)
+    check("重複同一句判為不足", _has_heavy_repetition(REAL_VAGUE) is True)
+    check("不重複的答案不誤判", _has_heavy_repetition(GOOD_ANSWER) is False)
+    for s in ("需根據運輸、儲存與部署時的氣候、持續時間及測試樣品配置來確定",
+              "應選取最壞情況", "可參考表 507.6-I", "視情況而定"):
+        from app.services.agent import _VAGUE_RE
+        check(f"空話措辭涵蓋：{s[:14]}", bool(_VAGUE_RE.search(s)))
+
+    # 4) 整體觸發條件（實際 agent 用的兩條路徑）
+    def gate(q: str, a: str) -> bool:
+        return (_wants_values(q) and _lacks_values(a)) or _is_degenerate(a)
+
+    for q, a, want, note in [
+        ("鹽霧測試的測試條件", VAGUE_ANSWER, True, "明確要數值 + 空表格"),
+        ("鹽霧測試的測試條件", GOOD_ANSWER, False, "已有數值不重複查"),
+        # 使用者實際踩到的起點：問「方法」不算在要數值，但答案退化 → 仍要自己深查
+        ("濕度測試方法", REAL_VAGUE, True, "退化答案路徑"),
+        ("我要測試條件", REAL_VAGUE, True, "明確要數值路徑"),
+        # 反向：本來就沒有數值的正常敘述答案不得誤觸發
+        ("鹽霧測試的目的是什麼", NO_VALUE_TOPIC, False, "目的題"),
+        ("這份文件的範圍是什麼", NO_VALUE_TOPIC, False, "scope 題"),
+        # 但「方法題」拿到純敘述（連一個參數都沒有）應該深查——這正是使用者
+        # 被迫追問 3 次的起點，寧可多花一輪也不要把問題丟回給使用者。
+        ("鹽霧測試方法", NO_VALUE_TOPIC, True, "方法題只拿到敘述 → 深查"),
+    ]:
+        check(f"觸發判斷：{q[:12]}／{note}", gate(q, a) is want, f"→ {gate(q, a)}")
 
     print()
     print("全部通過 ✅" if all(o for _, o in results) else "有失敗 ❌")
