@@ -132,6 +132,16 @@ def _extract_page_content(page) -> str:
     - 空白表格 → 只保留標題行
     - 其餘文字 → 保留空白佈局（layout=True）
     """
+    # 旋轉字元要先從頁面濾掉，再做表格與文字抽取。
+    #
+    # 只把還原後的旋轉文字「附加」在後面是不夠的：那些字元同時落在表格區域內，
+    # find_tables() 會照樣以錯誤順序抽出，結果同一頁裡正確版本與亂碼版本並存
+    #   ✗ .sruoh 95 ta 42 97 tnatsnoc eht 98 tuohguorht    ← 表格路徑產生的
+    #   ✓ Nearly constant at 27ºC (80ºF) throughout…       ← 還原後附加的
+    # 實測濾掉旋轉字元後，該頁反轉詞由 8 個降為 0，且表格數不變（2 個仍是 2 個）。
+    rotated_text = _extract_rotated_text(page)
+    page = page.filter(lambda o: o.get("upright", True) is not False)
+
     # 先找出所有表格及其位置
     table_objects = page.find_tables()
     table_bboxes = []
@@ -153,7 +163,6 @@ def _extract_page_content(page) -> str:
 
     # 取得非表格區域的文字（過濾掉落在表格 bbox 內的文字）
     words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
-    rotated_text = _extract_rotated_text(page)
     non_table_words: List[Dict[str, Any]] = []
 
     for word in words:

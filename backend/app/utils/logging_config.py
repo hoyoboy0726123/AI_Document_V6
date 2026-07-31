@@ -7,8 +7,13 @@ making it easier to monitor and debug the application.
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 from pathlib import Path
+
+# 單檔上限與保留份數：50MB x 4 = 200MB 上限
+_LOG_MAX_BYTES = 50 * 1024 * 1024
+_LOG_BACKUP_COUNT = 3
 
 
 class ColoredFormatter(logging.Formatter):
@@ -90,7 +95,16 @@ def setup_logging(
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        # 用輪替式：原本是 FileHandler，永遠不會停止長大。
+        # 實測 logs/app.log 累積到 16.2 GB —— 主因是 root 層級 DEBUG 加上
+        # httpcore 每個 HTTP 請求就寫 10 行 trace（send_request_headers.started…）。
+        # 上限約 50MB × 4 份 = 200MB，足夠回溯近期問題又不會吃掉磁碟。
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding='utf-8',
+        )
         file_handler.setLevel(numeric_level)
 
         file_format = logging.Formatter(
@@ -105,8 +119,17 @@ def setup_logging(
     logging.getLogger("multipart").setLevel(logging.WARNING)
     # pdfminer's LZW/CCITT decoders emit a DEBUG line per code — on large PDFs this
     # produces millions of lines and can exhaust memory. Keep these quiet always.
-    for _noisy in ("pdfminer", "pdfplumber", "PIL", "fontTools", "fitz"):
+    #
+    # httpcore 是 16.2 GB 那份 app.log 的主要來源：每一次 HTTP 呼叫都寫
+    # send_request_headers.started / .complete / receive_response_headers.started …
+    # 共 10 行 trace，而系統對 Ollama 的每次 embedding 與生成都是一次 HTTP 呼叫。
+    # httpx 的 INFO 一行摘要（"HTTP Request: POST … 200 OK"）保留，那個有用。
+    for _noisy in ("pdfminer", "pdfplumber", "PIL", "fontTools", "fitz",
+                   "httpcore", "urllib3", "asyncio", "filelock",
+                   "sentence_transformers", "transformers"):
         logging.getLogger(_noisy).setLevel(logging.WARNING)
+    for _quiet_info in ("httpx", "passlib", "alembic", "faiss"):
+        logging.getLogger(_quiet_info).setLevel(logging.INFO)
 
     return root_logger
 

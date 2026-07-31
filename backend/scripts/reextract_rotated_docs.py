@@ -73,6 +73,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--backup-dir", default="")
+    ap.add_argument("--only", default="", help="只處理標題含此字串的文件（一次一份，避免長時間累積）")
+    ap.add_argument("--list-only", action="store_true", help="只印出待處理標題，一行一個")
     args = ap.parse_args()
 
     db = SessionLocal()
@@ -86,7 +88,15 @@ def main() -> None:
         if is_cid_garbage(d.pdf_path):
             print(f"  [排除] {(d.title or '')[:40]}：文字層全是 cid 亂碼，需 OCR 而非文字重抽")
             continue
+        if args.only and args.only.lower() not in (d.title or "").lower():
+            continue
         targets.append((d, n))
+
+    if args.list_only:
+        for d, _ in targets:
+            print(d.title)
+        db.close()
+        return
 
     print(f"含旋轉文字的文件：{len(targets)} 份")
     for d, n in sorted(targets, key=lambda x: -x[1]):
