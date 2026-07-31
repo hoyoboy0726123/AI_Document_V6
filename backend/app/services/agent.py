@@ -322,6 +322,62 @@ _TABLE_REF_RE = re.compile(r"(?:table|表)\s*(\d{3}\.\d+-[IVX]+\b|\d{3}\.\d+-\d+
 _CYCLE_REF_RE = re.compile(r"\b(cycle\s+[A-C]\d?)\b", re.I)
 
 
+# --- 給非 agent 路徑（純 RAG 端點）使用的公開介面 ---------------------------
+# 這些判斷原本只服務 agent 的補救迴圈，但純 RAG 模式同樣會交出「每列都寫需依
+# 測試計畫指定」的空表格，需要同一套判準。以公開名稱匯出，避免 api 層去取私有名稱。
+
+def wants_values(question: str) -> bool:
+    """問題是否在索取具體數值（條件、參數、濃度、溫度、時間…）。"""
+    return _wants_values(question)
+
+
+def has_values(text: str) -> bool:
+    """文字中是否含帶單位的數值。"""
+    return bool(_VALUE_TOKEN_RE.search(text or ""))
+
+
+def value_seed_terms(evidence: List[Dict[str, Any]], answer: str = "") -> List[str]:
+    """從證據中抽出「找數值用」的查詢種子（表號、循環代號、英文參數名稱）。"""
+    return _extract_param_terms(evidence, answer)
+
+
+# 補查數值時允許偏離原命中頁的範圍。
+# 取 15 頁：實測 ±30 太寬，沙塵（命中 265-271）的範圍會涵蓋到黴菌測試（頁 240），
+# 補查因此把培養溫度與礦物鹽配方當成沙塵條件撈了回來。相鄰方法的間距就是這個量級。
+_SCOPE_PAGE_MARGIN = 15
+
+
+def evidence_scope(pages_by_doc: List[Tuple[Optional[str], Optional[int]]]) -> Dict[str, Tuple[int, int]]:
+    """由既有證據算出「同一主題的合理頁碼範圍」，供補查結果過濾。
+
+    沒有這道約束的後果（實測）：查沙塵測試時，補查用的關鍵字
+    「Test temperature(s)」把黴菌測試（Method 508，頁 240）的培養溫度與
+    礦物鹽配方撈了回來，答案言之鑿鑿地把它當成沙塵測試條件。
+    對照組是通用容差章節（頁 19/26）也被當成沙塵的溫度要求。
+
+    有數值但取自錯誤的方法，比沒有數值危險得多 —— 使用者要拿這些值寫測試計畫。
+    """
+    scope: Dict[str, Tuple[int, int]] = {}
+    for doc_id, page in pages_by_doc:
+        if not doc_id or not page:
+            continue
+        lo, hi = scope.get(doc_id, (page, page))
+        scope[doc_id] = (min(lo, page), max(hi, page))
+    return {d: (lo - _SCOPE_PAGE_MARGIN, hi + _SCOPE_PAGE_MARGIN) for d, (lo, hi) in scope.items()}
+
+
+def in_scope(scope: Dict[str, Tuple[int, int]], doc_id: Optional[str], page: Optional[int]) -> bool:
+    """補查到的段落是否落在合理範圍內。範圍未知（無頁碼）時保守放行。"""
+    if not scope:
+        return True
+    if not doc_id or doc_id not in scope:
+        return False          # 原本沒命中的文件 → 極可能是別的主題
+    if page is None:
+        return True
+    lo, hi = scope[doc_id]
+    return lo <= page <= hi
+
+
 def _extract_param_terms(evidence: List[Dict[str, Any]], answer: str) -> List[str]:
     """從證據與答案中撈出下一輪查詢的種子關鍵字。
 
@@ -462,6 +518,10 @@ def _grounded_synthesis(
             break
         seen = {(e.get("document_id"), e.get("page"),
                  (e.get("snippet") or e.get("text") or "")[:48]) for e in evidence}
+        # 補查必須限制在「原命中所在的文件與頁碼範圍」內，否則會跨到別的測試方法：
+        # 實測查沙塵測試時，關鍵字「Test temperature(s)」把黴菌測試（頁 240）的
+        # 培養溫度與礦物鹽配方撈回來，答案把它當成沙塵測試條件。
+        scope = evidence_scope([(e.get("document_id"), e.get("page")) for e in evidence])
         fresh: List[Dict[str, Any]] = []
         for term in terms[:4]:
             try:
@@ -470,6 +530,8 @@ def _grounded_synthesis(
                 logger.warning("ensure_values 補查「%s」失敗: %s", term, e)
                 continue
             for ev in more:
+                if not in_scope(scope, ev.get("document_id"), ev.get("page")):
+                    continue
                 k = (ev.get("document_id"), ev.get("page"),
                      (ev.get("snippet") or ev.get("text") or "")[:48])
                 if k not in seen:

@@ -10,6 +10,8 @@ rag_search tool all call.
 """
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -132,6 +134,27 @@ def _get_vector_config(db: Session, vector_config: Optional[Dict[str, Any]]) -> 
     return SystemConfigService(db).get_vector_config()
 
 
+_CID_RE = re.compile(r"\(cid:\d+\)")
+_UNREADABLE_CID_RATIO = 0.3
+
+
+def _is_unreadable(text: Optional[str]) -> bool:
+    """整塊幾乎都是 (cid:N) 代碼 → 抽取失敗的殘骸，不該進檢索結果。
+
+    來源：PDF 字型缺少 ToUnicode 對照表時，pdfminer 會退回輸出字元代碼。
+    實測 MIL-STD-1366E 有 1149 塊這種內容（佔整個向量庫 15%），中位數
+    99% 的字元是 cid 代碼。它們會被向量檢索命中並擠掉真正有內容的段落
+    —— 使用者查沙塵測試時，前四筆來源全是這種亂碼。
+
+    在檢索端過濾而非刪除資料：不需重建索引，且哪天把該 PDF 重新抽取好了
+    就會自動恢復可用。門檻取 0.3，正常英文段落偶爾夾雜幾個 cid 不受影響。
+    """
+    if not text:
+        return False
+    cid_chars = sum(len(m) for m in _CID_RE.findall(text))
+    return cid_chars / len(text) >= _UNREADABLE_CID_RATIO
+
+
 def hybrid_retrieve(
     db: Session,
     query: str,
@@ -184,6 +207,8 @@ def hybrid_retrieve(
         if project_id and not _project_matches(doc.metadata_data or {}, project_id):
             continue
         if folder_ids and doc.folder_id not in folder_ids:
+            continue
+        if _is_unreadable(chunk.text):
             continue
         page_key = (doc.id, chunk.page)
         if chunk.page is not None and page_key in seen_pages:

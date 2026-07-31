@@ -163,6 +163,29 @@ def main() -> None:
     ]:
         check(f"觸發判斷：{q[:12]}／{note}", gate(q, a) is want, f"→ {gate(q, a)}")
 
+    # 5) 補查的頁碼範圍約束
+    #
+    # 沒有這道時，補查關鍵字「Test temperature(s)」把黴菌測試（Method 508，頁 240）的
+    # 培養溫度與礦物鹽配方撈進沙塵測試的答案裡，且讀起來完全像真的。
+    # 有數值但取自錯誤的方法，比沒有數值危險 —— 使用者要拿這些值寫測試計畫。
+    from app.services.agent import evidence_scope, in_scope  # noqa: E402
+
+    sand = evidence_scope([("810H", 265), ("810H", 268), ("810H", 271)])
+    for pg, want, note in [
+        (271, True, "沙塵濃度"), (274, True, "同方法"), (276, True, "風速表"),
+        (240, False, "黴菌 Method 508"), (26, False, "通用容差"), (19, False, "通用容差"),
+    ]:
+        check(f"沙塵範圍：頁{pg}（{note}）", in_scope(sand, "810H", pg) is want)
+    check("別的文件一律擋掉", in_scope(sand, "781A", 103) is False)
+    check("無頁碼保守放行", in_scope(sand, "810H", None) is True)
+
+    humid = evidence_scope([("810H", 209), ("810H", 211), ("810H", 215)])
+    for pg, want, note in [
+        (212, True, "66/71°C"), (216, True, "含數值"), (226, True, "標準大氣條件"),
+        (768, False, "Method 520.5 複合環境"), (240, False, "黴菌"),
+    ]:
+        check(f"濕度範圍：頁{pg}（{note}）", in_scope(humid, "810H", pg) is want)
+
     print()
     print("全部通過 ✅" if all(o for _, o in results) else "有失敗 ❌")
 

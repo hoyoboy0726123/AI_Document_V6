@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import re
 from typing import Dict, List
 from datetime import datetime
@@ -12,9 +13,11 @@ from ... import models, schemas
 from ...core.config import settings
 from ...core.security import get_current_user
 from ...database import get_db
-from ...services import ai, pdf_image, rerank, retrieval
+from ...services import agent, ai, pdf_image, rerank, retrieval
 from ...services.system_config import SystemConfigService
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -29,6 +32,56 @@ def _hybrid_filtered(db, payload, search_query, embedding, vector_config, top_k)
         project_id=payload.project_id,
         folder_ids=payload.folder_ids,
     )
+
+
+def _augment_for_values(db, payload, embedding_fn, vector_config, top_k, question, filtered):
+    """問題在要數值、但檢索到的段落一個數值都沒有 → 先補一輪再生成。
+
+    為什麼要有這道：規範的「INFORMATION REQUIRED」章節只列參數名稱，實際數值在
+    別節。中文查詢常只命中前者，模型便交出一張每列都寫「需依測試計畫指定」的表格
+    —— 實測沙塵測試就是如此，17 列有 16 列沒有內容。
+
+    提示詞裡已有「嚴禁造出沒有內容的表格」，但模型不遵守，所以改用確定性做法。
+    這裡刻意檢查「證據」而非「答案」：串流一旦開始就收不回來，事後才發現沒有數值
+    已經來不及；而且檢查證據只多一輪檢索，不需要額外的 LLM 生成，純 RAG 的速度
+    定位得以維持。
+
+    補查關鍵字取自證據中的英文參數名稱與表號 —— 實測中文查詢撈不到任何數值段落，
+    同一份文件用英文術語查卻立刻命中（沙塵：頁 271/275/276 的濃度、風速、時間）。
+    """
+    if not filtered or not agent.wants_values(question):
+        return filtered
+    if any(agent.has_values(c.text) for c, _ in filtered):
+        return filtered
+
+    evidence = [{"snippet": c.text} for c, _ in filtered]
+    terms = agent.value_seed_terms(evidence)
+    if not terms:
+        return filtered
+
+    seen = {c.id for c, _ in filtered}
+    # 補查必須限制在「原命中所在的文件與頁碼範圍」內。沒有這道約束時，
+    # 查沙塵測試會撈回黴菌測試（Method 508）的培養溫度與礦物鹽配方，
+    # 答案讀起來完整卻是別的方法的條件 —— 比空表格危險得多。
+    scope = agent.evidence_scope([(c.document_id, c.page) for c, _ in filtered])
+    added = []
+    for term in terms[:3]:
+        emb = embedding_fn(f"{term} value requirement")
+        if not emb:
+            continue
+        for c, s in _hybrid_filtered(db, payload, f"{term} value requirement", emb,
+                                     vector_config, top_k):
+            if c.id in seen or not agent.has_values(c.text):
+                continue
+            if not agent.in_scope(scope, c.document_id, c.page):
+                continue
+            seen.add(c.id)
+            added.append((c, s))
+    if not added:
+        return filtered
+    logger.info("RAG 補查數值：關鍵字 %s → 補入 %d 段", terms[:3], len(added))
+    # 帶數值的放最前面：context 有預算上限，接在尾端會被截掉。
+    return added + filtered
 
 
 def _context_keep_ids(filtered):
@@ -88,6 +141,10 @@ def query_rag(
 
     filtered = _hybrid_filtered(
         db, payload, search_query, embeddings[0], vector_config, payload.top_k
+    )
+    filtered = _augment_for_values(
+        db, payload, lambda q: (ai.embed_texts([q]) or [None])[0],
+        vector_config, payload.top_k, question, filtered,
     )
     if not filtered:
         return schemas.RAGQueryResponse(answer="找不到符合的內容，請調整關鍵詞或過濾條件", sources=[])
@@ -208,6 +265,10 @@ def query_stream(
     top_k = payload.top_k or 5
     filtered = _hybrid_filtered(
         db, payload, search_query, embeddings[0], vector_config, top_k
+    )
+    filtered = _augment_for_values(
+        db, payload, lambda q: (ai.embed_texts([q]) or [None])[0],
+        vector_config, top_k, question, filtered,
     )
 
     if not filtered:
