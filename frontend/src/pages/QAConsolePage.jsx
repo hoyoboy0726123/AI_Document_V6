@@ -27,6 +27,7 @@ import { BulbOutlined, DeleteOutlined, RobotOutlined, SaveOutlined, SendOutlined
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import AppLayout from "../components/Layout/AppLayout";
+import FollowupInput from "../components/QA/FollowupInput";
 import apiClient from "../services/api";
 import useAuthStore from "../stores/authStore";
 import PdfPreviewModal from "../components/Documents/PdfPreviewModal";
@@ -68,7 +69,6 @@ const QAConsolePage = () => {
   const [documents, setDocuments] = useState([]);
   const [folders, setFolders] = useState([]);
   const [pdfPreview, setPdfPreview] = useState({ open: false, documentId: null, title: "", page: 1 });
-  const [followupQuestion, setFollowupQuestion] = useState("");
   const [expandedSnippets, setExpandedSnippets] = useState({});
   // 三模式:'rag'(純內容檢索) | 'hybrid'(自動路由,預設) | 'agent'(關係/多步)
   const [qaMode, setQaMode] = useState(() => {
@@ -488,11 +488,11 @@ const QAConsolePage = () => {
     try { window.localStorage.setItem("qa_mode", mode); } catch { /* ignore */ }
   };
 
-  const handleFollowupSubmit = async () => {
+  // 文字由 FollowupInput 自己持有並在送出時傳入 —— 上層不再因為打字而重渲染。
+  const handleFollowupSubmit = async (rawQuestion) => {
     if (loading) { message.warning("查詢進行中，請稍候或先按停止"); return; }  // audit H15
-    const question = followupQuestion?.trim();
+    const question = (rawQuestion || "").trim();
     if (!question) { message.warning("請輸入追問內容"); return; }
-    setFollowupQuestion("");
     // 追問沿用目前模式。
     if (qaMode === "agent") { await runAgentStream(question, { isFollowup: true }); return; }
     if (qaMode === "hybrid") { await runRouteStream(question, { isFollowup: true }); return; }
@@ -1034,27 +1034,8 @@ const QAConsolePage = () => {
               </div>
             )}
 
-            {/* Followup input */}
             {(conversationHistory.length > 0 || streamingMsg) && (
-              <div style={{ marginTop: 16, borderTop: "2px solid #e8e8e8", paddingTop: 12 }}>
-                <div style={{ marginBottom: 8, fontSize: 13, color: "#52c41a" }}>
-                  <QuestionCircleOutlined style={{ marginRight: 6 }} />
-                  追問輸入列 - AI 將延續上下文並優化您的提示
-                </div>
-                <Space.Compact style={{ width: "100%" }}>
-                  <Input.TextArea
-                    value={followupQuestion}
-                    onChange={(e) => setFollowupQuestion(e.target.value)}
-                    placeholder="例如：想知道更多？更詳細說明？"
-                    rows={1}
-                    autoSize={{ minRows: 1, maxRows: 4 }}
-                    onPressEnter={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); handleFollowupSubmit(); } }}
-                    disabled={loading}
-                  />
-                  <Button type="primary" icon={<SendOutlined />} onClick={handleFollowupSubmit} loading={loading}>追問</Button>
-                  {loading && (<Button danger icon={<StopOutlined />} onClick={stopInFlight}>停止</Button>)}
-                </Space.Compact>
-              </div>
+              <FollowupInput loading={loading} onSubmit={handleFollowupSubmit} onStop={stopInFlight} />
             )}
           </Card>
         </Col>
