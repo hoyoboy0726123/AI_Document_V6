@@ -13,6 +13,7 @@ Yields a stream of events for SSE consumption.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
@@ -399,6 +400,18 @@ def _build_history_messages(conversation_history: List[Dict[str, Any]]) -> List[
     return msgs
 
 
+# 每次請求可用的「補查數值」總輪數。用 ContextVar 而非全域變數，
+# 併發請求各有各的預算，不會互相扣減。
+_RETRY_BUDGET: contextvars.ContextVar = contextvars.ContextVar(
+    "agent_retry_budget", default=None)
+_RETRY_BUDGET_PER_REQUEST = 3
+
+
+def _reset_retry_budget() -> None:
+    """在每個對外請求的進入點呼叫，重設本次請求的補查預算。"""
+    _RETRY_BUDGET.set([_RETRY_BUDGET_PER_REQUEST])
+
+
 def _needs_deeper_search(question: str, answer: str) -> bool:
     """答案是否還不足以交給使用者（兩條路徑，見 `_wants_values` / `_is_degenerate`）。"""
     if not answer:
@@ -430,8 +443,18 @@ def _grounded_synthesis(
     if not ensure_values:
         return ans, sources, n_used, n_total
 
+    # 補查輪數是「整個請求」共用的預算，不是每個呼叫點各自 3 輪。
+    # 單次 agent 執行會經過多個合成點，各跑各的會累積成十幾次 LLM 生成，
+    # 使用者端就是長時間沒有回應。
+    budget = _RETRY_BUDGET.get()
+    if budget is None:  # 未經進入點（例如單元測試直接呼叫）→ 給預設額度
+        budget = [_RETRY_BUDGET_PER_REQUEST]
+        _RETRY_BUDGET.set(budget)
     evidence = list(rag_evidence)
     for _ in range(_PARAM_RETRY_MAX):
+        if budget[0] <= 0:
+            logger.debug("ensure_values：本次請求的補查預算已用完")
+            break
         if not _needs_deeper_search(question, ans):
             break
         terms = _extract_param_terms(evidence, ans)
@@ -459,6 +482,7 @@ def _grounded_synthesis(
         fresh.sort(key=lambda e: 0 if _VALUE_TOKEN_RE.search(
             e.get("snippet") or e.get("text") or "") else 1)
         evidence[:0] = fresh
+        budget[0] -= 1
         new_ans, new_sources, new_used, new_total = _synthesize_grounded(
             db, question, evidence, kg_notes, conversation_history)
         if new_ans:
@@ -628,6 +652,7 @@ def route_mode(question: str) -> str:
 def run_rag_only(db: Session, question: str,
                  conversation_history: Optional[List[Dict[str, Any]]] = None):
     """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。"""
+    _reset_retry_budget()
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
     ans, sources, n_used, n_total = _grounded_synthesis(db, question, seeded, [], conversation_history)
     if ans and ans.strip():
@@ -959,6 +984,7 @@ def run_agent(
       {"type": "final", "text": str}
       {"type": "error", "message": str}
     """
+    _reset_retry_budget()
     # 問題沒指名對象卻在要具體數值 → 先反問，不要硬答（agent 的互動價值）。
     #
     # 放在最前面而非流程末端的原因:語料有 20 幾種測試方法，各有自己的條件，
@@ -1470,60 +1496,14 @@ def run_agent(
         except Exception as e:
             logger.warning("agent supplement round failed: %s", e)
 
-    # 參數題的補救迴圈（確定性判斷，不依賴模型自我宣告）。
+    # 註：原本這裡還有一個「參數題補救迴圈」，已移除。
     #
-    # 動機：規範文件的「INFORMATION REQUIRED」章節只列出參數「名稱」（salt solution pH、
-    # fallout rate…），實際數值在另一節的程序裡。檢索常命中前者，模型便交出一張
-    # 每列都寫「需依測試計畫指定」的表格 —— 對使用者等於什麼都沒查到。
-    # 原本的充足性檢查只看「合成是否成功 / 有無 KG 邊 / seed 信心」，抓不到這種情況。
-    #
-    # 這裡改用可驗證的條件：問題在要數值 且 答案幾乎沒有帶單位的數字 → 視為未達成，
-    # 用「證據裡出現的參數名稱」當新關鍵字再查一輪（那份清單本身就是最好的查詢種子）。
-    for attempt in range(1, _PARAM_RETRY_MAX + 1):
-        # 兩條觸發路徑：
-        #   1. 使用者明確在要數值，而答案缺數值
-        #   2. 問題沒明講要數值，但答案本身就是退化的（零數值 + 空話/重複）
-        insufficient = (
-            (_wants_values(question) and _lacks_values(synth))
-            or _is_degenerate(synth)
-        ) if synth else False
-        if not insufficient:
-            break
-        terms = _extract_param_terms(rag_evidence, synth)
-        if not terms:
-            break
-        yield {"type": "thought", "step": max_steps + 1 + attempt,
-               "text": f"答案只列出需指定的項目、沒有實際數值，改用參數名稱重查："
-                       + "、".join(terms[:4])}
-        try:
-            fresh: List[Dict[str, Any]] = []
-            seen = {(e.get("document_id"), e.get("page"),
-                     (e.get("snippet") or e.get("text") or "")[:48]) for e in rag_evidence}
-            for term in terms[:4]:
-                more, _ = _seed_evidence_via_rag(db, f"{term} value requirement", top_k=5)
-                for e in more:
-                    k = (e.get("document_id"), e.get("page"),
-                         (e.get("snippet") or e.get("text") or "")[:48])
-                    if k not in seen:
-                        fresh.append(e)
-                        seen.add(k)
-            if not fresh:
-                break
-            # 補回來的證據要放在「最前面」，不能 append 到尾端。
-            #
-            # 合成受脈絡預算限制，只吃得下前面若干段（實測有 14 段被截掉）。
-            # 這一輪是「為了補數值」而精準撈的，接在尾端等於必定被截掉 ——
-            # 檢索明明撈到了頁 212 的 66ºC / 71ºC，最終答案卻仍然一個數值都沒有。
-            # 帶數值的段落再優先於其餘補充，確保預算優先花在數值上。
-            fresh.sort(key=lambda e: 0 if _VALUE_TOKEN_RE.search(
-                e.get("snippet") or e.get("text") or "") else 1)
-            rag_evidence[:0] = fresh
-            new_synth, new_sources, new_used = _synthesize()
-            if new_synth:
-                synth, syn_sources, n_used = new_synth, new_sources, new_used
-        except Exception as e:
-            logger.warning("agent param retry round %d failed: %s", attempt, e)
-            break
+    # 該邏輯現在內建在 `_grounded_synthesis` 裡（見該函式），因為 run_agent 有 9 個
+    # 產出答案的出口、8 個會提早 return，放在流程末端等於大部分情況都跑不到。
+    # 但搬進去之後忘了把這裡的舊迴圈刪掉，變成雙重重試：合成本身已重試 3 輪，
+    # 外層再判定一次又跑 3 輪，而 _grounded_synthesis 在單次 agent 執行中會被
+    # 呼叫 4 個地方 —— 最壞情況是 16 次 LLM 生成加 12 輪檢索。
+    # 實測單一請求卡住 6 分鐘、一分鐘內寫出 1031 行日誌，使用者端表現為系統無回應。
 
     if synth and synth.strip():
         final_text = synth
