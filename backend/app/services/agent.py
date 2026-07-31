@@ -161,9 +161,32 @@ _SUBJECT_RE = re.compile(
 )
 
 
+# 「X測試／X試驗」的通用式主體。_SUBJECT_RE 是寫死的測試類型白名單，一定會有漏網：
+# 實測「冷凝測試方法與條件」因為白名單沒有「冷凝」而被判成無主體，於是繼承了
+# 上一輪的「濕度」去查 —— 使用者問的明明是另一項測試。
+# 這裡不再要求測試名稱事先登錄，只排除「我要／找出」這類意圖詞。
+_XTEST_RE = re.compile(r"([一-鿿]{2})(?:測試|試驗)")
+_GENERIC_PREFIX = {
+    "我要", "我想", "找出", "列出", "請問", "想要", "幫我", "麻煩", "這個", "那個",
+    "進行", "執行", "做的", "相關", "所有", "全部", "什麼", "哪些", "本次", "這次",
+    "以上", "上述", "後續", "其他", "另外",
+}
+
+
+def _find_subject(text: str) -> Optional[str]:
+    """取出文字中的查詢對象（規範編號／方法號／測試類型），找不到回 None。"""
+    m = _SUBJECT_RE.search(text or "")
+    if m:
+        return m.group(0)
+    for m in _XTEST_RE.finditer(text or ""):
+        if m.group(1) not in _GENERIC_PREFIX:
+            return m.group(1)
+    return None
+
+
 def _lacks_subject(question: str) -> bool:
     """問題是否沒有指名查詢對象（測試類型、規範編號、方法號）。"""
-    return not bool(_SUBJECT_RE.search(question or ""))
+    return _find_subject(question) is None
 
 
 def _history_subject(conversation_history: Optional[List[Dict[str, Any]]]) -> Optional[str]:
@@ -175,9 +198,9 @@ def _history_subject(conversation_history: Optional[List[Dict[str, Any]]]) -> Op
     """
     for turn in reversed((conversation_history or [])[-3:]):
         for field in ("question", "answer"):
-            m = _SUBJECT_RE.search(str(turn.get(field) or "")[:300])
-            if m:
-                return m.group(0)
+            found = _find_subject(str(turn.get(field) or "")[:300])
+            if found:
+                return found
     return None
 
 

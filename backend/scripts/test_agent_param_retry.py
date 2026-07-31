@@ -97,6 +97,11 @@ def main() -> None:
         ("MIL-STD-810H 有哪些程序", False),
         ("Method 514 的條件", False),
         ("低溫測試要幾度", False),
+        # 白名單一定會有漏網：實測「冷凝測試」不在名單內而被判成無主體，
+        # 於是繼承了上一輪的「濕度」——使用者問的明明是另一項測試。
+        ("冷凝測試方法與條件", False),
+        ("結露試驗的條件", False),
+        ("砂蝕測試的參數", False),
     ]:
         check(f"缺主體判斷：{q[:16]}", _lacks_subject(q) is want, f"→ {_lacks_subject(q)}")
 

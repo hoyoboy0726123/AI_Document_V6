@@ -280,7 +280,10 @@ const QAConsolePage = () => {
     if (!finished) onDone?.();
   };
 
-  const runAgentStream = async (question) => {
+  // isFollowup 決定要不要帶對話歷史。左側是「新問題」、右側才是「追問」——
+  // 這兩個入口原本呼叫時參數完全相同，後端無從分辨，於是新問題也被套上
+  // 主體繼承（實測問「冷凝測試」被沿用成上一輪的「濕度」）。
+  const runAgentStream = async (question, { isFollowup = false } = {}) => {
     setLoading(true);
     setStreaming({
       question,
@@ -293,10 +296,9 @@ const QAConsolePage = () => {
       agentSteps: [],
     });
 
-    const historyForAgent = conversationHistory.map((m) => ({
-      question: m.question,
-      answer: m.answer,
-    }));
+    const historyForAgent = isFollowup
+      ? conversationHistory.map((m) => ({ question: m.question, answer: m.answer }))
+      : [];
 
     try {
       await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5 }, {
@@ -316,7 +318,7 @@ const QAConsolePage = () => {
               question: prev.question,
               answer: prev.answer,
               sources: prev.sources || [],
-              is_followup: false,
+              is_followup: isFollowup,
               optimized_query: null,
               thinking: "",
               suggested_questions: [],
@@ -348,13 +350,15 @@ const QAConsolePage = () => {
   };
 
   // 混合模式 — 打 /agent/route,先收 route 事件(知道被判到哪一邊),再串流 agent 步驟或直接 final
-  const runRouteStream = async (question) => {
+  const runRouteStream = async (question, { isFollowup = false } = {}) => {
     setLoading(true);
     setStreaming({
       question, thinking: "", answer: "", isStreaming: true, thinkingDone: false,
       sources: [], agentMode: true, hybrid: true, routedMode: null, agentSteps: [],
     });
-    const historyForAgent = conversationHistory.map((m) => ({ question: m.question, answer: m.answer }));
+    const historyForAgent = isFollowup
+      ? conversationHistory.map((m) => ({ question: m.question, answer: m.answer }))
+      : [];
     try {
       await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5 }, {
         onEvent: (eventName, data) => {
@@ -373,7 +377,7 @@ const QAConsolePage = () => {
           if (prev) {
             const newMsg = {
               question: prev.question, answer: prev.answer, sources: prev.sources || [],
-              is_followup: false, optimized_query: null, thinking: "", suggested_questions: [],
+              is_followup: isFollowup, optimized_query: null, thinking: "", suggested_questions: [],
               used_ai_fallback: false, agentMode: prev.routedMode === "agent", hybrid: true,
               routedMode: prev.routedMode, agentSteps: prev.agentSteps || [], timestamp: new Date().toISOString(),
             };
@@ -459,8 +463,8 @@ const QAConsolePage = () => {
     if (!question) { message.warning("請輸入問題"); return; }
     form.setFieldValue("question", "");
 
-    if (qaMode === "agent") { await runAgentStream(question); return; }
-    if (qaMode === "hybrid") { await runRouteStream(question); return; }
+    if (qaMode === "agent") { await runAgentStream(question, { isFollowup: false }); return; }
+    if (qaMode === "hybrid") { await runRouteStream(question, { isFollowup: false }); return; }
 
     const { document_id, folder_ids } = decodeDocScope(values.doc_scope);
     const payload = {
@@ -490,8 +494,8 @@ const QAConsolePage = () => {
     if (!question) { message.warning("請輸入追問內容"); return; }
     setFollowupQuestion("");
     // 追問沿用目前模式。
-    if (qaMode === "agent") { await runAgentStream(question); return; }
-    if (qaMode === "hybrid") { await runRouteStream(question); return; }
+    if (qaMode === "agent") { await runAgentStream(question, { isFollowup: true }); return; }
+    if (qaMode === "hybrid") { await runRouteStream(question, { isFollowup: true }); return; }
     const currentFormValues = form.getFieldsValue();
     const { document_id, folder_ids } = decodeDocScope(currentFormValues.doc_scope);
     const payload = {
