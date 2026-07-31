@@ -1,61 +1,46 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Card,
   Col,
-  Collapse,
   Empty,
   Form,
   Input,
   InputNumber,
-  List,
   Modal,
   Row,
   Segmented,
   Select,
   Space,
   Tag,
-  Timeline,
   Tooltip,
   TreeSelect,
   Typography,
-  Divider,
   Alert,
   message,
 } from "antd";
-import { BulbOutlined, DeleteOutlined, RobotOutlined, SaveOutlined, SendOutlined, QuestionCircleOutlined, StopOutlined, ToolOutlined, EyeOutlined } from "@ant-design/icons";
+import { DeleteOutlined, SaveOutlined, SendOutlined, QuestionCircleOutlined, StopOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import AppLayout from "../components/Layout/AppLayout";
 import FollowupInput from "../components/QA/FollowupInput";
+import HistoryMessage from "../components/QA/HistoryMessage";
+import { markdownComponents, renderAgentSteps, renderSources, renderThinking } from "../components/QA/messageParts";
 import apiClient from "../services/api";
 import useAuthStore from "../stores/authStore";
 import PdfPreviewModal from "../components/Documents/PdfPreviewModal";
 
 const { Text } = Typography;
 
-// 保險層：舊資料的向量塊可能被 VL 模型包在 ```markdown 圍籬裡（後端 ai.py 已在
-// 新資料入庫前剝除，但既有資料若不重跑 OCR 仍帶著圍籬）。若不剝掉，ReactMarkdown
-// 會依規範把整段當程式碼區塊原樣顯示，表格與標題都不會渲染。
-// 只處理「包裝用」圍籬；文件內真正的程式碼區塊（```python 等）保留。
-const stripFenceWrapper = (text) => {
-  if (!text || !text.includes("```")) return text;
-  const src = text.trim();
-  const whole = src.match(/^```[ \t]*(?:markdown|md)?[ \t]*\n([\s\S]*?)\n?```$/i);
-  if (whole && !whole[1].includes("```")) return whole[1].trim();
 
-  const isWrapper = (line) => /^```[ \t]*(?:markdown|md)[ \t]*$/i.test(line.trim());
-  if (!src.split("\n").some(isWrapper)) return src;
-
-  const kept = [];
-  let inWrapper = false;
-  for (const line of src.split("\n")) {
-    const bare = line.trim();
-    if (isWrapper(bare)) { inWrapper = true; continue; }
-    if (inWrapper && bare === "```") { inWrapper = false; continue; }
-    kept.push(line);
-  }
-  return kept.join("\n").trim();
+// 從 sources 去重取得唯一文件清單（純函式，放模組層級讓 useCallback 相依保持乾淨）
+const uniqueDocsFromSources = (sources) => {
+  const seen = new Set();
+  return (sources || []).filter((s) => {
+    if (seen.has(s.document_id)) return false;
+    seen.add(s.document_id);
+    return true;
+  });
 };
 
 const QAConsolePage = () => {
@@ -525,27 +510,23 @@ const QAConsolePage = () => {
     message.success("對話歷史已清除");
   };
 
-  const openPdfPreview = (source) => {
+  // 以下三個 callback 要保持穩定參考，memo 化的 HistoryMessage 才不會白做工。
+  // 它們只呼叫 setState（setState 本身是穩定的），所以相依可以是空陣列。
+  const openPdfPreview = useCallback((source) => {
     const page = source.page && source.page > 0 ? source.page : 1;
     setPdfPreview({ open: true, documentId: source.document_id, title: source.title, page });
-  };
+  }, []);
 
-  // 從 sources 去重取得唯一文件清單
-  const uniqueDocsFromSources = (sources) => {
-    const seen = new Set();
-    return (sources || []).filter((s) => {
-      if (seen.has(s.document_id)) return false;
-      seen.add(s.document_id);
-      return true;
-    });
-  };
+  const toggleSnippet = useCallback((key) => {
+    setExpandedSnippets((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
 
-  const openSaveNoteModal = (msg) => {
+  const openSaveNoteModal = useCallback((msg) => {
     const docs = uniqueDocsFromSources(msg.sources);
     if (docs.length === 0) { message.warning("此回答無引用文件，無法儲存筆記"); return; }
     setSaveNoteDocId(docs[0].document_id); // 預設選第一份
     setSaveNoteModal({ visible: true, msg });
-  };
+  }, []);
 
   const handleSaveNote = async () => {
     if (!saveNoteDocId) { message.warning("請選擇要儲存的文件"); return; }
@@ -659,196 +640,9 @@ const QAConsolePage = () => {
     () => projectOptions.map((item) => ({ value: item.value, label: item.display_value })),
     [projectOptions]
   );
-  // Shared ReactMarkdown components for styled table rendering
-  const markdownComponents = {
-    table: ({ node, ...props }) => (
-      <div style={{ overflowX: "auto", marginBottom: 8 }}>
-        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 14 }} {...props} />
-      </div>
-    ),
-    thead: ({ node, ...props }) => <thead style={{ background: "#fafafa" }} {...props} />,
-    th: ({ node, ...props }) => (
-      <th style={{ border: "1px solid #d9d9d9", padding: "6px 12px", fontWeight: 600, textAlign: "left", whiteSpace: "nowrap" }} {...props} />
-    ),
-    td: ({ node, ...props }) => (
-      <td style={{ border: "1px solid #d9d9d9", padding: "6px 12px" }} {...props} />
-    ),
-    tr: ({ node, ...props }) => <tr style={{ borderBottom: "1px solid #f0f0f0" }} {...props} />,
-  };
 
-  // Render thinking collapse for a message (history or live)
-  const renderThinking = (thinking, isLive, thinkingDone) => {
-    if (!thinking) return null;
-    const labelText = isLive && !thinkingDone ? "思考中..." : "思考過程";
-    // Force-expand only while streaming thinking; afterwards let user control it freely
-    const forceProps = isLive && !thinkingDone ? { activeKey: ["t"] } : {};
-    return (
-      <Collapse
-        size="small"
-        style={{ marginBottom: 12, background: "#fffbe6", border: "1px solid #ffe58f" }}
-        {...forceProps}
-        items={[{
-          key: "t",
-          label: (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              <BulbOutlined style={{ marginRight: 4 }} />{labelText}
-            </Text>
-          ),
-          children: (
-            <Text style={{ fontSize: 12, whiteSpace: "pre-wrap", color: "#888" }}>{thinking}</Text>
-          ),
-        }]}
-      />
-    );
-  };
 
-  // Render source list
-  const renderSources = (sources, msgIndex) => {
-    if (!sources || sources.length === 0) return null;
-    return (
-      <div style={{ marginTop: 16 }}>
-        <Divider orientation="left" style={{ fontSize: 13, marginTop: 16, marginBottom: 12 }}>
-          參考來源({sources.length})
-        </Divider>
-        <List
-          size="small"
-          dataSource={sources}
-          renderItem={(source, idx) => {
-            const key = `${msgIndex}-${idx}`;
-            const isExpanded = !!expandedSnippets[key];
-            const full = stripFenceWrapper(source.snippet || "");
-            const needsTruncate = full.length > 200;
-            const displaySnippet = needsTruncate && !isExpanded ? full.slice(0, 200) : full;
-            return (
-              <List.Item key={key}>
-                <List.Item.Meta
-                  title={
-                    <Space size={8} wrap>
-                      <Tag color="green">來源 {idx + 1}</Tag>
-                      <Text>{source.title || "(未命名文件)"}{typeof source.page === "number" ? ` - 第 ${source.page} 頁` : ""}</Text>
-                      {source.score != null && (<Text type="secondary">(相似度 {source.score.toFixed(3)})</Text>)}
-                      <Button size="small" onClick={() => openPdfPreview(source)}>預覽</Button>
-                    </Space>
-                  }
-                  description={
-                    <div>
-                      {(!needsTruncate || isExpanded) ? (
-                        // 完整顯示時：以 Markdown 渲染（表格、清單等），比較美觀
-                        <div className="markdown-content" style={{ fontSize: 13, color: "#595959" }}>
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                            {full}
-                          </ReactMarkdown>
-                        </div>
-                      ) : (
-                        // 收合預覽時：純文字截斷（避免顯示切一半的表格），快速掃視
-                        <Text style={{ whiteSpace: "pre-wrap" }}>
-                          {displaySnippet}...
-                        </Text>
-                      )}
-                      {needsTruncate && (
-                        <Button
-                          type="link"
-                          size="small"
-                          style={{ padding: "0 0 0 4px", height: "auto", fontSize: 12 }}
-                          onClick={() => setExpandedSnippets((prev) => ({ ...prev, [key]: !prev[key] }))}
-                        >
-                          {isExpanded ? "收起" : "展開全文"}
-                        </Button>
-                      )}
-                    </div>
-                  }
-                />
-              </List.Item>
-            );
-          }}
-        />
-      </div>
-    );
-  };
 
-  const renderAgentSteps = (steps, isLive) => {
-    if (!steps || steps.length === 0) {
-      if (isLive) {
-        return (
-          <div style={{ padding: "8px 0 12px" }}>
-            <Text type="secondary" style={{ fontSize: 12, fontStyle: "italic" }}>
-              <RobotOutlined /> Agent 啟動中...
-            </Text>
-          </div>
-        );
-      }
-      return null;
-    }
-    const items = steps
-      .filter((s) => s.event === "thought" || s.event === "tool_call" || s.event === "observation")
-      .map((s) => {
-        if (s.event === "thought") {
-          return {
-            color: "blue",
-            dot: <BulbOutlined style={{ fontSize: 14 }} />,
-            children: (
-              <div>
-                <Text strong style={{ fontSize: 12, color: "#1677ff" }}>思考 #{s.step}</Text>
-                <div style={{ fontSize: 13, color: "#555" }}>{s.text}</div>
-              </div>
-            ),
-          };
-        }
-        if (s.event === "tool_call") {
-          return {
-            color: "purple",
-            dot: <ToolOutlined style={{ fontSize: 14 }} />,
-            children: (
-              <div>
-                <Text strong style={{ fontSize: 12, color: "#722ed1" }}>呼叫 {s.tool}</Text>
-                <pre style={{ fontSize: 11, background: "#f0f0f0", padding: 6, borderRadius: 4, overflow: "auto", maxHeight: 100, marginTop: 4 }}>
-                  {JSON.stringify(s.input || {}, null, 2)}
-                </pre>
-              </div>
-            ),
-          };
-        }
-        // observation
-        const outStr = JSON.stringify(s.output || {}, null, 2);
-        const preview = outStr.length > 400 ? outStr.slice(0, 400) + "..." : outStr;
-        return {
-          color: "green",
-          dot: <EyeOutlined style={{ fontSize: 14 }} />,
-          children: (
-            <div>
-              <Text strong style={{ fontSize: 12, color: "#52c41a" }}>觀察 ({s.tool})</Text>
-              <pre style={{ fontSize: 11, background: "#f6ffed", padding: 6, borderRadius: 4, overflow: "auto", maxHeight: 200, marginTop: 4 }}>
-                {preview}
-              </pre>
-            </div>
-          ),
-        };
-      });
-    return (
-      <Collapse
-        size="small"
-        ghost
-        defaultActiveKey={isLive ? ["agent"] : []}
-        style={{ marginBottom: 8 }}
-        items={[
-          {
-            key: "agent",
-            label: (
-              <Space>
-                <RobotOutlined style={{ color: "#1677ff" }} />
-                <Text strong style={{ fontSize: 13 }}>Agent 推理過程</Text>
-                <Tag color="blue" style={{ fontSize: 11 }}>{items.length} 步</Tag>
-                {isLive && !steps.some((s) => s.event === "final") && (
-                  <Tag color="processing" style={{ fontSize: 11 }}>進行中</Tag>
-                )}
-              </Space>
-            ),
-            children: <Timeline items={items} style={{ marginTop: 8 }} />,
-          },
-        ]}
-      />
-    );
-  };
 
   return (
     <AppLayout>
@@ -947,50 +741,19 @@ const QAConsolePage = () => {
               <Empty description="尚未開始對話，請先在左側輸入問題以開始查詢" style={{ padding: "48px 0" }} />
             ) : (
               <div style={{ maxHeight: "calc(100vh - 200px)", overflowY: "auto", padding: "0 8px" }}>
-                {/* Completed conversation history */}
+                {/* 已完成的對話記錄。memo 化：串流每收到一段文字就更新上層 state，
+                    若歷史訊息跟著重繪，上百則的 ReactMarkdown 會讓整頁卡頓。 */}
                 {conversationHistory.map((msg, index) => (
-                  <div key={index} style={{ marginBottom: 32 }}>
-                    <div style={{ marginBottom: 16 }}>
-                      <Tag color="blue" style={{ fontSize: 14, padding: "4px 12px" }}>問題 {index + 1}</Tag>
-                      {msg.is_followup && (<Tag color="orange" style={{ marginLeft: 8 }}>追問</Tag>)}
-                      {msg.hybrid && msg.routedMode && (
-                        <Tag color={msg.routedMode === "agent" ? "geekblue" : "green"} style={{ marginLeft: 8 }}>
-                          混合→{msg.routedMode === "agent" ? "關係查詢(Agent)" : "內容查詢(RAG)"}
-                        </Tag>
-                      )}
-                      <Text strong style={{ fontSize: 16, marginLeft: 8 }}>{msg.question}</Text>
-                      {msg.optimized_query && msg.optimized_query !== msg.question && (
-                        <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #1890ff" }}>
-                          <Text type="secondary" style={{ fontSize: 13 }}>AI 理解：{msg.optimized_query}</Text>
-                        </div>
-                      )}
-                    </div>
-                    <Card size="small" style={{ background: "#f9f9f9", borderLeft: msg.agentMode ? "4px solid #1677ff" : (msg.used_ai_fallback ? "4px solid #faad14" : "4px solid #52c41a") }}>
-                      {msg.used_ai_fallback && (
-                        <Alert message="AI 一般知識回答" description="此答案由 AI 一般知識庫產生，可能不來自系統文件內容" type="warning" showIcon style={{ marginBottom: 12 }} />
-                      )}
-                      {/* Agent steps (collapsed in history) */}
-                      {msg.agentMode && renderAgentSteps(msg.agentSteps, false)}
-                      {/* Thinking section: collapsed by default in history */}
-                      {!msg.agentMode && renderThinking(msg.thinking, false, true)}
-                      <div style={{ fontSize: 15, lineHeight: 1.8 }}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{msg.answer}</ReactMarkdown>
-                      </div>
-                      {renderSources(msg.sources, index)}
-                      {msg.sources?.length > 0 && (
-                        <div style={{ marginTop: 12, textAlign: "right" }}>
-                          <Button
-                            size="small"
-                            icon={<SaveOutlined />}
-                            onClick={() => openSaveNoteModal(msg)}
-                          >
-                            儲存筆記
-                          </Button>
-                        </div>
-                      )}
-                    </Card>
-                    {(index < conversationHistory.length - 1 || streamingMsg) && <Divider />}
-                  </div>
+                  <HistoryMessage
+                    key={index}
+                    msg={msg}
+                    index={index}
+                    expandedSnippets={expandedSnippets}
+                    onToggleSnippet={toggleSnippet}
+                    onPreviewPdf={openPdfPreview}
+                    onSaveNote={openSaveNoteModal}
+                    showDivider={index < conversationHistory.length - 1 || !!streamingMsg}
+                  />
                 ))}
 
                 {/* Live streaming message */}
@@ -1025,7 +788,7 @@ const QAConsolePage = () => {
                           </Text>
                         )}
                       </div>
-                      {streamingMsg.thinkingDone && renderSources(streamingMsg.sources, "live")}
+                      {streamingMsg.thinkingDone && renderSources(streamingMsg.sources, "live", expandedSnippets, toggleSnippet, openPdfPreview)}
                     </Card>
                   </div>
                 )}
