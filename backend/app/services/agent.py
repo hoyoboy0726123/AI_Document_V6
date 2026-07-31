@@ -110,9 +110,20 @@ _WANTS_VALUE_RE = re.compile(
     re.I,
 )
 # 帶單位的具體數值（規範常用單位）
+# 「帶單位的數值」。單位表漏一項，該類題型就會被判成「答案沒有數值」而白跑
+# 三輪補查，最後仍判定不足 —— 實測漏掉的有：
+#   加速度 g / 脈衝 ms（衝擊 516.8）、力 N、質量 kg、長度 m、電壓 V、電流 A、
+#   轉速 rpm、壓力 Pa/mbar/torr、pH。810H 的衝擊／振動／落下方法幾乎全用這些。
+#   例：「峰值加速度 40 g，脈衝持續時間 11 ms」原本會被判為零數值。
+# 單位邊界用 \b 收尾，避免 "5 games"、"20 gauge" 這類誤判。
 _VALUE_TOKEN_RE = re.compile(
-    r"\d+(?:\.\d+)?\s*(?:%|°\s?[CF]|º[CF]|℃|℉|m/s|ft/min|g/m3|g/m³|g/ft3|ml/cm|kPa|hPa|psi|Hz|dB"
-    r"|mm|cm|inch|英寸|小時|分鐘|秒|天|hours?|minutes?|days?)",
+    r"\d+(?:\.\d+)?\s*(?:%|°\s?[CF]|º[CF]|℃|℉|m/s2|m/s²|m/s|ft/min|g/m3|g/m³|g/ft3|ml/cm"
+    r"|kPa|hPa|mbar|torr|psi|Pa|Hz|dB|rpm|lux|ppm"
+    r"|mm|cm|km|inch|英寸|小時|分鐘|秒|天|hours?|minutes?|days?|ms"
+    r"|(?:g|m|N|V|A|W|kg|kN)\b)"
+    # pH 是前置單位（「pH 值應維持在 6.5」數字在後），與上面「數字＋單位」的
+    # 形式相反，必須單獨列一條，否則規範裡最常見的 pH 要求會被判成沒有數值。
+    r"|pH\s*值?\s*[^\d\n]{0,8}\d",
     re.I,
 )
 # 「沒給數值」的典型措辭。實測補上原本漏掉的講法:
@@ -458,14 +469,24 @@ def _build_history_messages(conversation_history: List[Dict[str, Any]]) -> List[
 
 # 每次請求可用的「補查數值」總輪數。用 ContextVar 而非全域變數，
 # 併發請求各有各的預算，不會互相扣減。
-_RETRY_BUDGET: contextvars.ContextVar = contextvars.ContextVar(
-    "agent_retry_budget", default=None)
 _RETRY_BUDGET_PER_REQUEST = 3
 
 
-def _reset_retry_budget() -> None:
-    """在每個對外請求的進入點呼叫，重設本次請求的補查預算。"""
-    _RETRY_BUDGET.set([_RETRY_BUDGET_PER_REQUEST])
+def _new_retry_budget() -> List[int]:
+    """建立本次請求的補查預算（可變容器，沿呼叫鏈傳遞）。
+
+    刻意「不」用 ContextVar：run_agent 是 generator，經 StreamingResponse 回傳時
+    Starlette 的 iterate_in_threadpool 對每次 next() 都用 copy_context() 執行，
+    generator 內 set() 的 ContextVar 在第一次 yield 之後就消失。實測：
+
+        經 iterate_in_threadpool: set後=有值 → yield後=None → 之後都是 None
+        同步驅動（單元測試）:      set後=有值 → yield後=有值（同一物件）
+
+    於是每個合成點都取到 None、各自重新拿一份 3 輪額度 —— 6 個呼叫點最壞是
+    24 次 LLM 生成，正是「單一請求卡住數分鐘」那個以為已修好的病。
+    單元測試同步驅動 generator，所以驗不出來。
+    """
+    return [_RETRY_BUDGET_PER_REQUEST]
 
 
 # 收斂前必須保留的證據下限。低於這個數字就不動手 —— 寧可留著雜訊，
@@ -522,6 +543,7 @@ def _grounded_synthesis(
     conversation_history: Optional[List[Dict[str, Any]]],
     *,
     ensure_values: bool = True,
+    retry_budget: Optional[List[int]] = None,
 ) -> tuple:
     """外層包裝：合成一次，若答案缺數值就自己補查再合成，直到夠用或試完。
 
@@ -542,10 +564,8 @@ def _grounded_synthesis(
     # 補查輪數是「整個請求」共用的預算，不是每個呼叫點各自 3 輪。
     # 單次 agent 執行會經過多個合成點，各跑各的會累積成十幾次 LLM 生成，
     # 使用者端就是長時間沒有回應。
-    budget = _RETRY_BUDGET.get()
-    if budget is None:  # 未經進入點（例如單元測試直接呼叫）→ 給預設額度
-        budget = [_RETRY_BUDGET_PER_REQUEST]
-        _RETRY_BUDGET.set(budget)
+    # 呼叫端沒帶預算（例如單元測試直接呼叫）→ 給一份獨立額度
+    budget = retry_budget if retry_budget is not None else _new_retry_budget()
     evidence = list(rag_evidence)
     for _ in range(_PARAM_RETRY_MAX):
         if budget[0] <= 0:
@@ -754,9 +774,9 @@ def route_mode(question: str) -> str:
 def run_rag_only(db: Session, question: str,
                  conversation_history: Optional[List[Dict[str, Any]]] = None):
     """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。"""
-    _reset_retry_budget()
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
-    ans, sources, n_used, n_total = _grounded_synthesis(db, question, seeded, [], conversation_history)
+    ans, sources, n_used, n_total = _grounded_synthesis(db, question, seeded, [], conversation_history,
+                                                    retry_budget=_new_retry_budget())
     if ans and ans.strip():
         note = _coverage_note(max(0, n_total - n_used), 0)
         return ans.strip() + (note or ""), sources
@@ -1079,6 +1099,7 @@ def run_agent(
     max_steps: int = 8,
 ) -> Generator[Dict[str, Any], None, None]:
     """
+    _budget = _new_retry_budget()   # 本次請求共用；不可用 ContextVar，見 _new_retry_budget
     Yield events:
       {"type": "thought", "step": n, "text": ...}
       {"type": "tool_call", "step": n, "tool": str, "input": dict}
@@ -1086,7 +1107,6 @@ def run_agent(
       {"type": "final", "text": str}
       {"type": "error", "message": str}
     """
-    _reset_retry_budget()
     # 問題沒指名對象卻在要具體數值 → 先反問，不要硬答（agent 的互動價值）。
     #
     # 放在最前面而非流程末端的原因:語料有 20 幾種測試方法，各有自己的條件，
@@ -1151,7 +1171,8 @@ def run_agent(
                         _seed, _ = _seed_evidence_via_rag(db, question, top_k=5)
                         if _seed:
                             _g, _rag_src, _n, _t = _grounded_synthesis(
-                                db, question, _seed, [], conversation_history
+                                db, question, _seed, [], conversation_history,
+                                retry_budget=_budget,
                             )
                             if _g and _g.strip():
                                 _rag_part = _g.strip()
@@ -1204,7 +1225,8 @@ def run_agent(
                "text": f"偵測到結構性問題：用知識圖譜撈齊「{struct.get('matched')}」全部子項，再結合 RAG 合成完整答案。"}
         try:
             ans, sources, _u, _t = _grounded_synthesis(
-                db, question, struct["rag_evidence"], struct["kg_notes"], conversation_history
+                db, question, struct["rag_evidence"], struct["kg_notes"], conversation_history,
+                retry_budget=_budget,
             )
         except Exception as e:
             logger.warning("structural grounded synthesis failed: %s", e)
@@ -1411,7 +1433,7 @@ def run_agent(
             block = "\n".join(plines)
             rag_part, p_sources = None, []
             try:
-                g, p_sources, _n, _t = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history)
+                g, p_sources, _n, _t = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history, retry_budget=_budget)
                 if g and g.strip():
                     rag_part = g.strip()
             except Exception as e:
@@ -1489,7 +1511,7 @@ def run_agent(
             # 再加上 RAG 合成（文件內容檢索：內部章節、程序性引用、背景）
             rag_part, rag_sources = None, []
             try:
-                g, rag_sources, _n, _t = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history)
+                g, rag_sources, _n, _t = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history, retry_budget=_budget)
                 if g and g.strip():
                     rag_part = g.strip()
             except Exception as e:
@@ -1527,7 +1549,7 @@ def run_agent(
         if spec_block:
             rag_part, rag_sources = None, []
             try:
-                g, rag_sources, _n, _t = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history)
+                g, rag_sources, _n, _t = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history, retry_budget=_budget)
                 if g and g.strip():
                     rag_part = g.strip()
             except Exception as e:
@@ -1549,7 +1571,8 @@ def run_agent(
             return None, [], 0
         try:
             g, srcs, n_used, n_total = _grounded_synthesis(
-                db, question, rag_evidence, kg_notes, conversation_history
+                db, question, rag_evidence, kg_notes, conversation_history,
+                retry_budget=_budget,
             )
             if g and g.strip():
                 note = _coverage_note(max(0, n_total - n_used), kg_edges_seen)

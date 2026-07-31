@@ -137,6 +137,10 @@ def _get_vector_config(db: Session, vector_config: Optional[Dict[str, Any]]) -> 
 _CID_RE = re.compile(r"\(cid:\d+\)")
 _UNREADABLE_CID_RATIO = 0.3
 
+# 目錄頁的點引線（「第 3 章 .......... 15」）。
+_DOT_LEADER_RE = re.compile(r"\.{5,}")
+_TOC_DOT_RATIO = 0.10
+
 
 def _is_unreadable(text: Optional[str]) -> bool:
     """整塊幾乎都是 (cid:N) 代碼 → 抽取失敗的殘骸，不該進檢索結果。
@@ -151,8 +155,22 @@ def _is_unreadable(text: Optional[str]) -> bool:
     """
     if not text:
         return False
-    cid_chars = sum(len(m) for m in _CID_RE.findall(text))
-    return cid_chars / len(text) >= _UNREADABLE_CID_RATIO
+    if _CID_RE.search(text):
+        cid_chars = sum(len(m) for m in _CID_RE.findall(text))
+        if cid_chars / len(text) >= _UNREADABLE_CID_RATIO:
+            return True
+
+    # 目錄頁：整塊都是「章節標題 ....... 頁碼」。
+    #
+    # 這類區塊語意空洞，卻因為含有大量真實章節標題而向量相似度很高 —— 使用者問
+    # 「沙塵測試程序」，命中的是目錄裡寫著「沙塵測試」那一行，而不是內文。
+    # 實測 631 / 7558（8.35%）的區塊屬於此類；活體檢索（12 條查詢 × top-50）
+    # 顯示它們佔掉 12% 的候選名額，其中 2 條查詢的第一名直接就是目錄頁。
+    #
+    # 門檻對曲線不敏感（>10% 得 631 塊、>50% 得 535 塊），表示這些是純目錄，
+    # 不會誤傷正文中偶爾出現的省略號。
+    dot_chars = sum(len(m) for m in _DOT_LEADER_RE.findall(text))
+    return dot_chars / len(text) >= _TOC_DOT_RATIO
 
 
 def hybrid_retrieve(
