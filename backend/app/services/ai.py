@@ -140,6 +140,23 @@ def _chat_with_provider(
     return result
 
 
+_CITATION_RE = re.compile(r"\[來源\s*\d+\]")
+
+
+def _strip_citations(text: str) -> str:
+    """把歷史答案裡的 [來源N] 換成「(前一輪)」。
+
+    歷史是以純文字塞在脈絡旁邊的。實測模型會整句照抄前一輪的內容，連 [來源1]
+    一起抄過來 —— 但本輪的來源 1 是完全不同的段落。使用者回頭查證時翻不到那個
+    數值，看起來就像系統在幻覺（實測：「標準大氣條件 23 ± 2 °C、50 ± 5% RH」
+    掛在一個不含這些值的來源上）。
+
+    這裡不試圖阻止照抄（提示詞約束實測不可靠），而是讓照抄的結果至少是誠實的：
+    抄過去的是「(前一輪)」而不是一個假的來源編號。
+    """
+    return _CITATION_RE.sub("（前一輪）", text or "")
+
+
 def _prepare_history(conversation_history: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
     # Local light-weight sanitizer to avoid leaking control tokens into prompts
     import re as _re
@@ -322,10 +339,16 @@ def _build_rag_messages(
     if conversation_history:
         recent = conversation_history[-2:]
         history_text = "\n".join(
-            f"Q: {turn.get('question', '')}\nA: {turn.get('answer', '')}"
+            f"Q: {turn.get('question', '')}\nA: {_strip_citations(turn.get('answer', ''))}"
             for turn in recent
         )
-    history_section = f"對話歷史（最近 2 輪）：\n{history_text}\n" if history_text else ""
+    history_section = (
+        "對話歷史（最近 2 輪，僅供理解語境）：\n"
+        f"{history_text}\n"
+        "注意：以上歷史「不是」本次的參考來源。若要沿用其中的數值，必須在下方"
+        "可用段落中重新找到依據；找不到就標記為（前一輪，本次來源未涵蓋），"
+        "不可為它掛上 [來源N]。\n"
+    ) if history_text else ""
 
     prompt = (
         tmpl

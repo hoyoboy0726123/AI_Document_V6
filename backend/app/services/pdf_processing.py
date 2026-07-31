@@ -73,6 +73,58 @@ def _table_header_summary(table_data: List[List]) -> str:
     return " | ".join(header_cells)
 
 
+def _extract_rotated_text(page) -> str:
+    """把頁面上「旋轉 90 度」的文字依正確閱讀順序取出。
+
+    pdfplumber 的 extract_words 只處理直立字元；旋轉字元會以字元的原始順序
+    出現，結果整段是顛倒的。實測 MIL-STD-810H 第 216 頁的圖表註記變成
+
+        .sruoh 42 eht tuohguorht Cº72 ta tnatsnoc ylraeN
+
+    也就是「Nearly constant at 27ºC throughout the 24 hours.」全部反過來，
+    連數字都反轉（001→100、59→95）。這些是晝夜循環圖的資料註記，內容有用，
+    但以這種形式進向量庫只會變成雜訊。
+
+    排序依據以實測決定：字元矩陣為 (0, b, c, 0) 代表旋轉 90 度，
+      b > 0（逆時針）→ 逐欄由左至右、欄內由下往上（x0 遞增、top 遞減）
+      b < 0（順時針）→ 反向
+    在第 216 頁上，前者可還原出正確英文，其餘三種排序都不行。
+    """
+    rot = [c for c in page.chars if not c.get("upright", True)]
+    if not rot:
+        return ""
+
+    def _ccw(c) -> bool:
+        m = c.get("matrix")
+        return bool(m) and len(m) >= 2 and m[1] > 0
+
+    ccw = sum(1 for c in rot if _ccw(c)) >= len(rot) / 2
+    key = (lambda c: (round(c["x0"], 0), -c["top"])) if ccw else \
+          (lambda c: (-round(c["x0"], 0), c["top"]))
+
+    ordered = sorted(rot, key=key)
+    # 依 x0 分欄；同一欄的字元屬於同一段旋轉文字
+    lines: List[str] = []
+    cur_x: Optional[float] = None
+    buf: List[str] = []
+    for c in ordered:
+        x = round(c["x0"], 0)
+        if cur_x is None or abs(x - cur_x) <= _ROTATED_COLUMN_TOLERANCE:
+            buf.append(c["text"])
+        else:
+            if "".join(buf).strip():
+                lines.append("".join(buf).strip())
+            buf = [c["text"]]
+        cur_x = x
+    if "".join(buf).strip():
+        lines.append("".join(buf).strip())
+    return "\n".join(lines)
+
+
+# 旋轉文字分欄的 x0 容差（同一段旋轉文字的字元 x0 會有些微差異）
+_ROTATED_COLUMN_TOLERANCE = 6.0
+
+
 def _extract_page_content(page) -> str:
     """
     從 pdfplumber page 提取內容：
@@ -101,6 +153,7 @@ def _extract_page_content(page) -> str:
 
     # 取得非表格區域的文字（過濾掉落在表格 bbox 內的文字）
     words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
+    rotated_text = _extract_rotated_text(page)
     non_table_words: List[Dict[str, Any]] = []
 
     for word in words:
@@ -147,7 +200,10 @@ def _extract_page_content(page) -> str:
     all_parts = text_parts + table_parts
     all_parts.sort(key=lambda x: x[0])
 
-    return "\n".join(text for _, text in all_parts).strip()
+    body = "\n".join(text for _, text in all_parts).strip()
+    if rotated_text:
+        body = (body + "\n" + rotated_text).strip() if body else rotated_text
+    return body
 
 
 def extract_text_and_segments(pdf_bytes: bytes) -> Tuple[str, List[schemas.DocumentSegment]]:

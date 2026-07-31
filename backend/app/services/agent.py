@@ -468,6 +468,45 @@ def _reset_retry_budget() -> None:
     _RETRY_BUDGET.set([_RETRY_BUDGET_PER_REQUEST])
 
 
+# 收斂前必須保留的證據下限。低於這個數字就不動手 —— 寧可留著雜訊，
+# 也不要把脈絡砍到不足以作答。
+_MIN_EVIDENCE_TO_PRUNE = 3
+# 錨點頁碼的最大容許跨距。超過就代表最高分的幾筆本來就不在同一章節，
+# 沒有「主題」可依循 —— 這時收斂只會砍錯。
+_ANCHOR_MAX_SPREAD = 60
+
+
+def _drop_off_topic(question: str, evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """數值題才做：丟掉離主命中太遠的證據（多半是別的測試方法）。
+
+    agent 自己的 rag_search 不受補查那道範圍約束，實測查沙塵測試時，
+    來源裡仍會混進頁 236/240（黴菌測試 Method 508）。這一次答案沒有誤用，
+    但同樣的證據送進合成，模型隨時可能把別的方法的溫度當成沙塵條件。
+
+    只在「問題在要數值」時收斂，關係題／列舉題不受影響 —— 那些本來就需要
+    跨規範查詢（「MIL-DTL-901 被哪些 810H 方法引用」），收斂會直接毀掉它們。
+    """
+    if not _wants_values(question) or len(evidence) < _MIN_EVIDENCE_TO_PRUNE:
+        return evidence
+    # 以排序最前面的幾筆當錨點（檢索分數最高＝最可能就是使用者要的章節）
+    anchor = [(e.get("document_id"), e.get("page")) for e in evidence[:3]]
+    scope = evidence_scope(anchor)
+    # 錨點本身就分散（跨文件、或頁碼相距很遠）→ 沒有明確的主題章節可依循，
+    # 推出來的範圍會大到失去意義，收斂反而可能砍錯。這種情況不動它。
+    if len(scope) != 1:
+        return evidence
+    lo, hi = next(iter(scope.values()))
+    if (hi - lo) - 2 * _SCOPE_PAGE_MARGIN > _ANCHOR_MAX_SPREAD:
+        return evidence
+    kept = [e for e in evidence if in_scope(scope, e.get("document_id"), e.get("page"))]
+    if len(kept) < _MIN_EVIDENCE_TO_PRUNE:
+        return evidence      # 收斂過頭 → 放棄收斂
+    if len(kept) < len(evidence):
+        logger.info("數值題收斂證據：%d → %d 段（丟掉離主命中過遠的）",
+                    len(evidence), len(kept))
+    return kept
+
+
 def _needs_deeper_search(question: str, answer: str) -> bool:
     """答案是否還不足以交給使用者（兩條路徑，見 `_wants_values` / `_is_degenerate`）。"""
     if not answer:
@@ -494,6 +533,7 @@ def _grounded_synthesis(
     `ensure_values=False` 供內部輔助呼叫使用（子問題拆解、摘要生成）——
     那些不是要交給使用者的最終答案，不值得多花幾輪檢索。
     """
+    rag_evidence = _drop_off_topic(question, rag_evidence)
     ans, sources, n_used, n_total = _synthesize_grounded(
         db, question, rag_evidence, kg_notes, conversation_history)
     if not ensure_values:
