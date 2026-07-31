@@ -22,12 +22,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _hybrid_filtered(db, payload, search_query, embedding, vector_config, top_k):
-    """Thin adapter → services.retrieval.hybrid_retrieve（檢索邏輯的唯一實作）。"""
+def _hybrid_filtered(db, payload, search_query, embedding, vector_config, top_k,
+                     document_id=None):
+    """Thin adapter → services.retrieval.hybrid_retrieve（檢索邏輯的唯一實作）。
+
+    document_id 若有傳入則覆寫 payload 的值 —— 用於「查詢裡點名了規範編號」時
+    把範圍鎖到該文件（見 retrieval.resolve_spec_scope）。
+    """
     return retrieval.hybrid_retrieve(
         db, search_query, embedding, top_k,
         vector_config=vector_config,
-        document_id=payload.document_id,
+        document_id=document_id or payload.document_id,
         classification_id=payload.classification_id,
         project_id=payload.project_id,
         folder_ids=payload.folder_ids,
@@ -135,12 +140,16 @@ def query_rag(
 
         # Always re-search with optimized_query for accurate follow-up results
 
-    embeddings = ai.embed_texts([search_query])
+    # 規範編號從「嵌入用字串」移到「文件過濾條件」：它在目錄／頁首／參考文獻
+    # 出現上千次，留在查詢裡會主導向量、把答案段落擠出候選池。
+    embed_query, spec_doc_id = retrieval.resolve_spec_scope(db, search_query)
+    embeddings = ai.embed_texts([embed_query])
     if not embeddings:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="嵌入計算失敗")
 
     filtered = _hybrid_filtered(
-        db, payload, search_query, embeddings[0], vector_config, payload.top_k
+        db, payload, search_query, embeddings[0], vector_config, payload.top_k,
+        document_id=spec_doc_id,
     )
     filtered = _augment_for_values(
         db, payload, lambda q: (ai.embed_texts([q]) or [None])[0],
@@ -177,6 +186,13 @@ def query_rag(
             continue
 
         text = _context_text_budgeted(db, chunk, ctx_used)
+        # 預算用完時會回空字串。原本仍無條件 append，於是 LLM 收到
+        #     [來源4] MIL-STD-810H (第 276 頁)
+        #     （空白）
+        # 那一頁正是含「1.1 ±0.3 g/m3」的段落 —— 檢索撈到了、也進了 keep_ids，
+        # 卻拿到 0 個字元。空塊仍保留在 sources（使用者點得到），只是不進脈絡。
+        if not text:
+            continue
         ctx_used += len(text)
         contexts.append({
             "source_num": source_num,
@@ -255,7 +271,8 @@ def query_stream(
     if (has_cn and not has_cn_opt) or (not has_cn and has_cn_opt):
         search_query = question
 
-    embeddings = ai.embed_texts([search_query])
+    embed_query, spec_doc_id = retrieval.resolve_spec_scope(db, search_query)
+    embeddings = ai.embed_texts([embed_query])
     if not embeddings:
         def _embed_error():
             yield f"data: {json.dumps({'type': 'error', 'message': '嵌入計算失敗'}, ensure_ascii=False)}\n\n"
@@ -264,7 +281,8 @@ def query_stream(
 
     top_k = payload.top_k or 5
     filtered = _hybrid_filtered(
-        db, payload, search_query, embeddings[0], vector_config, top_k
+        db, payload, search_query, embeddings[0], vector_config, top_k,
+        document_id=spec_doc_id,
     )
     filtered = _augment_for_values(
         db, payload, lambda q: (ai.embed_texts([q]) or [None])[0],
@@ -297,6 +315,8 @@ def query_stream(
         if chunk.id not in keep_ids:
             continue
         text = _context_text_budgeted(db, chunk, ctx_used)
+        if not text:      # 同上：空脈絡不送進 LLM
+            continue
         ctx_used += len(text)
         contexts.append({
             "source_num": source_num, "title": doc.title, "page": chunk_page, "page_gap": page_gap,

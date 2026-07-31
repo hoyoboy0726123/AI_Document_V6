@@ -141,6 +141,9 @@ _UNREADABLE_CID_RATIO = 0.3
 _DOT_LEADER_RE = re.compile(r"\.{5,}")
 _TOC_DOT_RATIO = 0.10
 
+# 同一頁最多納入幾塊。1（原行為）會讓 60% 的區塊永遠取不到。
+_MAX_CHUNKS_PER_PAGE = 3
+
 
 def _is_unreadable(text: Optional[str]) -> bool:
     """整塊幾乎都是 (cid:N) 代碼 → 抽取失敗的殘骸，不該進檢索結果。
@@ -171,6 +174,55 @@ def _is_unreadable(text: Optional[str]) -> bool:
     # 不會誤傷正文中偶爾出現的省略號。
     dot_chars = sum(len(m) for m in _DOT_LEADER_RE.findall(text))
     return dot_chars / len(text) >= _TOC_DOT_RATIO
+
+
+_SPEC_ID_IN_QUERY_RE = re.compile(
+    r"\b(MIL-(?:STD|HDBK|DTL|PRF)-\d+[A-Z]?(?:-\d+)?|AR\s?\d+-\d+"
+    r"|ASTM\s?[A-Z]?\d+|IEC\s?\d+(?:-\d+)*|ISO\s?\d+|NATO\s?STANAG\s?\d+)\b",
+    re.I,
+)
+
+
+def resolve_spec_scope(db: Session, question: str) -> Tuple[str, Optional[str]]:
+    """把查詢裡的規範編號從「嵌入用字串」移到「文件過濾條件」。
+
+    回傳 (給 embedding 用的字串, document_id 或 None)。
+
+    為什麼要這麼做：使用者最自然的問法是「MIL-STD-810H 沙塵測試的沙塵濃度是
+    多少」，但 `MIL-STD-810H` 這串 token 在該文件的目錄頁、頁首、參考文獻頁
+    出現上千次，會主導整個查詢向量，把真正的答案段落擠出候選名單。實測：
+
+        MIL-STD-810H 沙塵測試的沙塵濃度是多少   含編號 → 正解排名 [62, 181]
+        沙塵測試的沙塵濃度是多少                 去編號 → 正解排名 [1, 8, 10, 12]
+        MIL-STD-810H 低壓測試的最終客艙高度      含編號 → 前 200 名內沒有正解
+
+    候選池只有 top_k × multiplier（預設 50），排名 62 等於根本進不了池子，
+    後面的 rerank 再強也救不回來。端對端實測：同一題純中文問法答得出濃度，
+    加上編號就回「查無相關資料」。
+
+    單純移除編號會失去「只有編號才指得出文件」的能力（例如「MIL-STD-461G 的
+    CE102」），所以把編號改用來鎖定 document_id —— 兩者兼得。
+    BM25 那一路仍拿原始字串，編號在關鍵字比對上是有用訊號。
+    """
+    ids = _SPEC_ID_IN_QUERY_RE.findall(question or "")
+    if not ids:
+        return question, None
+
+    doc_id = None
+    for raw in ids:
+        norm = re.sub(r"\s+", "", raw).upper()
+        for doc in db.query(models.Document.id, models.Document.title).all():
+            if norm in re.sub(r"\s+", "", (doc.title or "")).upper():
+                doc_id = doc.id
+                break
+        if doc_id:
+            break
+
+    # 找不到對應文件就不要縮限範圍（可能是語料裡沒有的外部規範），
+    # 但仍把編號從嵌入字串移除 —— 它對向量檢索只有干擾。
+    stripped = _SPEC_ID_IN_QUERY_RE.sub(" ", question or "")
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    return (stripped or question), doc_id
 
 
 def hybrid_retrieve(
@@ -210,7 +262,7 @@ def hybrid_retrieve(
     pool_size = max(top_k, getattr(settings, "RAG_RERANK_POOL", 12)) if rerank_on else top_k
 
     pool: List[Tuple[object, float]] = []
-    seen_pages = set()
+    page_counts: Dict[tuple, int] = {}
     for fid, vscore in fused:
         chunk = chunk_map.get(fid)
         if not chunk:
@@ -228,10 +280,17 @@ def hybrid_retrieve(
             continue
         if _is_unreadable(chunk.text):
             continue
+        # 同一頁允許多塊。
+        #
+        # 原本一頁只留 RRF 最前面的那一塊，但語料平均一頁 2.52 塊、最多 34 塊，
+        # 有 60% 的區塊在「同頁已被別人佔走」後就永遠取不到。實測 5 題中有 4 題，
+        # 這道去重剛好殺掉了唯一含規格數值的那一塊（例如頁 276 的
+        # 「1.1 ±0.3 g/m3」）—— 檢索本來找得到，卻在組池階段被丟掉。
         page_key = (doc.id, chunk.page)
-        if chunk.page is not None and page_key in seen_pages:
-            continue
-        seen_pages.add(page_key)
+        if chunk.page is not None:
+            if page_counts.get(page_key, 0) >= _MAX_CHUNKS_PER_PAGE:
+                continue
+            page_counts[page_key] = page_counts.get(page_key, 0) + 1
         pool.append((chunk, vscore if vscore is not None else 0.0))
         if len(pool) >= pool_size:
             break

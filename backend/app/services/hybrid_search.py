@@ -249,5 +249,15 @@ def fuse(
             s += 1.0 / (rrf_k + kw_rank[fid] + 1)
         return s
 
-    ordered = sorted(fids, key=_rrf, reverse=True)
+    # 平局要有確定性的次序。只出現在單一名單的候選，RRF 分數必定是
+    # 1/(k+i+1)，因此大量精確平手（實測 90 個候選只有 57 個相異分數、
+    # 66 個處於平手）。sorted 雖是穩定排序，但輸入是 set 的迭代順序 ——
+    # 由 int hash bucket 決定，與相關性無關，同一題兩次執行可能不同名次。
+    # 平手時改用「兩張名單中較前面的那個名次」決勝。
+    INF = 10 ** 9
+
+    def _tie_break(fid: int) -> int:
+        return min(vec_rank.get(fid, INF), kw_rank.get(fid, INF))
+
+    ordered = sorted(fids, key=lambda f: (-_rrf(f), _tie_break(f)))
     return [(fid, vec_score.get(fid)) for fid in ordered], set(kw_rank)

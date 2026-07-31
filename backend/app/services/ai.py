@@ -13,17 +13,33 @@ from .ollama_client import get_client
 logger = logging.getLogger(__name__)
 
 
+# 英文語料實測 4.52 字元/token（Ollama prompt_eval_count 量測）。取 4.0 保守，
+# 因為中文問題與中文答案的比率接近 1，混合後實際值會低於純英文。
+_CHARS_PER_TOKEN = 4.0
+
+
 def effective_rag_budget() -> int:
     """依實際 OLLAMA_NUM_CTX 動態夾限 RAG context 字數預算。
 
     input+output 共用同一 context window；此函式回傳「可給 context 的字數上限」，
-    並保留 RAG_OUTPUT_RESERVE_CHARS 給生成，避免 prompt 把視窗塞滿導致模型吐空。
-    （本語料 CJK 為主，約 1 token/字，故直接用 num_ctx 當字數上限的近似。）
+    並保留額度給生成，避免 prompt 把視窗塞滿導致模型吐空。
+
+    原本的註解寫「本語料 CJK 為主，約 1 token/字」，於是直接拿 num_ctx 當字數
+    上限。但語料其實是英文 MIL-STD 規範，實測 **4.52 字元/token**（用 Ollama 的
+    prompt_eval_count 量的）。結果是 5192 字元的脈絡只換到 1151 tokens，
+    8192 的視窗有 86% 從未被使用 —— 卻同時因為「預算用完」而把後面撈到的
+    段落截成空字串。使用者看到的就是「答案裡沒有數值，但來源清單裡明明有」。
+
+    改成以 token 為單位換算，並保留 prompt 本身（system prompt、模板、問題、
+    對話歷史）的額外開銷。
     """
     nctx = getattr(settings, "OLLAMA_NUM_CTX", None) or 4096
-    reserve = getattr(settings, "RAG_OUTPUT_RESERVE_CHARS", 1800)
-    cap = getattr(settings, "RAG_CONTEXT_BUDGET_CHARS", 6000)
-    return max(1500, min(cap, nctx - reserve))
+    reserve_tokens = getattr(settings, "RAG_OUTPUT_RESERVE_TOKENS", 2048)
+    # system prompt + user 模板 + 問題 + 對話歷史。這些原本完全沒被計入。
+    overhead_tokens = getattr(settings, "RAG_PROMPT_OVERHEAD_TOKENS", 1500)
+    avail_tokens = max(512, nctx - reserve_tokens - overhead_tokens)
+    cap = getattr(settings, "RAG_CONTEXT_BUDGET_CHARS", 20000)
+    return max(1500, min(cap, int(avail_tokens * _CHARS_PER_TOKEN)))
 
 
 DOCUMENT_SUGGESTION_SCHEMA: Dict[str, Any] = {

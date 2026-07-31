@@ -98,26 +98,34 @@ def _extract_rotated_text(page) -> str:
         m = c.get("matrix")
         return bool(m) and len(m) >= 2 and m[1] > 0
 
-    ccw = sum(1 for c in rot if _ccw(c)) >= len(rot) / 2
-    key = (lambda c: (round(c["x0"], 0), -c["top"])) if ccw else \
-          (lambda c: (-round(c["x0"], 0), c["top"]))
+    # 同一頁可能同時有兩種旋轉方向 —— 曲線圖的資料標註與座標軸標籤常相反。
+    # 先前用「多數決決定整頁方向」，結果資料標註還原了、軸標籤仍是顛倒的：
+    #     Constant at 95 percent  )tnecrep( ytidimuH evitaleR
+    #     （前半正確，後半是 Relative Humidity (percent) 反轉）
+    # 改為依方向分組，各自用自己的排序鍵。
+    groups = [
+        ([c for c in rot if _ccw(c)], lambda c: (round(c["x0"], 0), -c["top"])),
+        ([c for c in rot if not _ccw(c)], lambda c: (-round(c["x0"], 0), c["top"])),
+    ]
 
-    ordered = sorted(rot, key=key)
-    # 依 x0 分欄；同一欄的字元屬於同一段旋轉文字
     lines: List[str] = []
-    cur_x: Optional[float] = None
-    buf: List[str] = []
-    for c in ordered:
-        x = round(c["x0"], 0)
-        if cur_x is None or abs(x - cur_x) <= _ROTATED_COLUMN_TOLERANCE:
-            buf.append(c["text"])
-        else:
-            if "".join(buf).strip():
-                lines.append("".join(buf).strip())
-            buf = [c["text"]]
-        cur_x = x
-    if "".join(buf).strip():
-        lines.append("".join(buf).strip())
+    for chars, key in groups:
+        if not chars:
+            continue
+        # 依 x0 分欄；同一欄的字元屬於同一段旋轉文字
+        cur_x: Optional[float] = None
+        buf: List[str] = []
+        for c in sorted(chars, key=key):
+            x = round(c["x0"], 0)
+            if cur_x is None or abs(x - cur_x) <= _ROTATED_COLUMN_TOLERANCE:
+                buf.append(c["text"])
+            else:
+                if "".join(buf).strip():
+                    lines.append("".join(buf).strip())
+                buf = [c["text"]]
+            cur_x = x
+        if "".join(buf).strip():
+            lines.append("".join(buf).strip())
     return "\n".join(lines)
 
 

@@ -22,7 +22,30 @@ from . import ai
 
 logger = logging.getLogger(__name__)
 
-_SNIPPET_CHARS = 500
+
+def _resolve_device() -> str:
+    """decide the cross-encoder device.
+
+    原本寫死 "cpu"，於是 24GB 的顯卡在 rerank 期間全程閒置，而 rerank 是每次
+    查詢都會跑的階段。設定值 auto 時偵測 CUDA，偵測失敗一律退回 cpu
+    （載入失敗還有既有的 _CE_FAILED 降級路徑接住）。
+    """
+    want = str(getattr(settings, "RAG_RERANK_DEVICE", "auto") or "auto").lower()
+    if want != "auto":
+        return want
+    try:
+        import torch  # noqa: PLC0415
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:  # noqa: BLE001
+        return "cpu"
+
+# 送進 cross-encoder 的每塊字元數。
+#
+# 原本 500，但實測語料的平均塊長是 1465 字元 —— 也就是 reranker 對每塊的後
+# 三分之二完全沒看到就在打分，而規範文件的數值與表格列常在塊的後半。
+# max_length=512 是 token 上限，英文約當 2000 字元，所以瓶頸一直是這個常數
+# 而不是模型。取 1800 與切塊的 max_chars 一致。
+_SNIPPET_CHARS = getattr(settings, "RAG_RERANK_SNIPPET_CHARS", 1800)
 
 # ── cross-encoder 後端 ───────────────────────────────────────────────
 _CE_MODEL = None
@@ -48,15 +71,16 @@ def _get_cross_encoder():
             from sentence_transformers import CrossEncoder
 
             model_name = getattr(settings, "RAG_RERANK_MODEL", "BAAI/bge-reranker-base")
-            logger.info("rerank: loading cross-encoder %s (cpu) ...", model_name)
+            _device = _resolve_device()
+            logger.info("rerank: loading cross-encoder %s (%s) ...", model_name, _device)
             # 離線優先：已快取就免連網（秒載、無網路也可用，利於打包 .exe）；沒快取再允許下載。
             prev = os.environ.get("HF_HUB_OFFLINE")
             try:
                 os.environ["HF_HUB_OFFLINE"] = "1"
-                _CE_MODEL = CrossEncoder(model_name, device="cpu", max_length=512)
+                _CE_MODEL = CrossEncoder(model_name, device=_device, max_length=512)
             except Exception:
                 os.environ["HF_HUB_OFFLINE"] = "0"
-                _CE_MODEL = CrossEncoder(model_name, device="cpu", max_length=512)
+                _CE_MODEL = CrossEncoder(model_name, device=_device, max_length=512)
             finally:
                 if prev is None:
                     os.environ.pop("HF_HUB_OFFLINE", None)

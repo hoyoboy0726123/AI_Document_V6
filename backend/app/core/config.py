@@ -37,7 +37,12 @@ class Settings(BaseSettings):
     # Optional generation controls (help avoid truncated answers)
     # -1 for unlimited tokens (Ollama default); increase context for long PDFs
     OLLAMA_NUM_PREDICT: int | None = -1
-    OLLAMA_NUM_CTX: int | None = 8192
+    # 8192 曾是全鏈路的瓶頸：因為它，RAG_MAX_CONTEXT_CHUNKS 被壓到 6、
+    # RAG_CONTEXT_BUDGET_CHARS 壓到 6000、表格逐列增強只能做第一個來源，
+    # 答案末端才會頻繁出現「另有 N 段因長度限制未展開」。
+    # 24GB VRAM 跑 qwen3:8b @ 24k 綽綽有餘。放寬後務必用評估確認長脈絡下
+    # 生成品質沒有退化（長 context 可能出現「中間遺失」）。
+    OLLAMA_NUM_CTX: int | None = 24576
     # Sampling and repetition controls (optional; set in .env if needed)
     OLLAMA_TEMPERATURE: float | None = None
     OLLAMA_TOP_P: float | None = None
@@ -94,7 +99,11 @@ class Settings(BaseSettings):
     RAG_EXPAND_MAX_CHARS: int = 2000           # 單一來源擴展後的字數上限
     # 所有來源餵入 LLM 的總字數「上限」(實際還會依 num_ctx 動態夾限，見 effective_rag_budget)。
     # input+output 共用同一 context window，須留生成空間。8192 視窗下 6000 字安全。
-    RAG_CONTEXT_BUDGET_CHARS: int = 6000
+    # 脈絡字數上限。6000 是 num_ctx=8192 時代的遺留值，而且當時把字元誤當 token
+    # （英文語料實測 4.52 字元/token），等於只用到視窗的 14%。
+    RAG_CONTEXT_BUDGET_CHARS: int = 20000
+    RAG_OUTPUT_RESERVE_TOKENS: int = 2048    # 留給生成
+    RAG_PROMPT_OVERHEAD_TOKENS: int = 1500   # system prompt + 模板 + 問題 + 對話歷史
     RAG_OUTPUT_RESERVE_CHARS: int = 3000       # 預留給「生成」的視窗額度（夾限時扣除）；調高以容納多來源長答案
 
     # OCR(PP-StructureV3)頁面影像大小。paddle CPU 在「大尺寸影像」上跑 layout/table 模型會
@@ -140,12 +149,19 @@ class Settings(BaseSettings):
     # 撈寬再精選（rerank）：對融合後的候選池，用一次便宜 LLM 打分，把「真正含規格/判定/程序」
     # 的乾淨段落排到前面、把修訂紀錄/續頁/目錄等垃圾踢掉，再餵生成。失敗自動退回原順序。
     RAG_RERANK: bool = True
-    RAG_RERANK_POOL: int = 12                   # 送進 rerank 的候選數（撈寬）
+    # 送進 rerank 的候選數。12 太小 —— 融合後有 50~90 個候選，實測 pool 加大到
+    # 24 是 recall@5 從 0.7 提升到 0.8 的關鍵之一（CE 成本 0.4s → 1.0s）。
+    RAG_RERANK_POOL: int = 24
     RAG_RERANK_MIN_SCORE: int = 3               # LLM 後端：低於此分（0-10）視為不相關，剔除
     # rerank 後端：cross_encoder（專門模型，CPU，~1-3s，建議）／ llm（用 gemma 打分，慢 ~100s）。
     # cross_encoder 載入失敗會自動退回 llm。
     RAG_RERANK_BACKEND: str = "cross_encoder"
     RAG_RERANK_MODEL: str = "BAAI/bge-reranker-base"  # 多語(含中英)cross-encoder，CPU 可跑
+    # rerank 送進 cross-encoder 的每塊字元數。原本寫死 500，而語料平均塊長 1465
+    # —— reranker 對每塊後 2/3 沒看到就打分，規範的數值常在後半。與切塊 max_chars 對齊。
+    RAG_RERANK_SNIPPET_CHARS: int = 1800
+    # auto = 有 CUDA 就用 GPU。原本寫死 cpu，rerank 是每次查詢都跑的階段，顯卡卻閒置。
+    RAG_RERANK_DEVICE: str = "auto"      # auto | cpu | cuda
 
     # 低信心 fallback：以「最相關段落的 cross-encoder 分數」當信心訊號。實測相關題 top 分數
     # ≥0.4(離題 ≈0.00），故門檻設 0.15 可乾淨分開。低於此值時不硬答，改回「最接近的內容
