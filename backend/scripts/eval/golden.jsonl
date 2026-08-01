@@ -1,0 +1,35 @@
+{"id":"v01","kind":"value","q":"沙塵測試的塵土濃度是多少","gold":["10.6 ±7 g/m3","0.3 ±0.2 g/ft3"],"doc":"MIL-STD-810H","note":"Method 510.7 4.1.1.5"}
+{"id":"v02","kind":"value","q":"鹽霧測試的箱體溫度要維持在幾度","gold":["95 ±3.6 °F"],"doc":"MIL-STD-810H","note":"Method 509.7 2.2.4"}
+{"id":"v03","kind":"value","q":"黴菌測試量測濕球溫度時，通過濕球的風速至少要多少","gold":["4.6 m/s"],"doc":"MIL-STD-810H","note":"Method 508.8"}
+{"id":"v04","kind":"value","q":"淋雨測試建議的最小降雨強度是多少","gold":["1.7 mm"],"doc":"MIL-STD-810H","note":"Method 506.6"}
+{"id":"v05","kind":"value","q":"標準大氣條件下的溫度與相對濕度是多少","gold":["77 ± 18°F"],"doc":"MIL-STD-810H","note":"Part One 標準環境"}
+{"id":"v06","kind":"value","q":"受控環境的溫度公差與相對濕度規定是什麼","gold":["10.0 kPa"],"doc":"MIL-STD-810H","note":"Part One 受控條件"}
+{"id":"v07","kind":"value","q":"測試時的壓力量測公差是多少","gold":["0.029 psi"],"doc":"MIL-STD-810H","note":"Part One 4.2 量測公差"}
+{"id":"v08","kind":"value","q":"軍用運輸機全動力起飛時的平均高度變化率是多少","gold":["7.6 m/s"],"doc":"MIL-STD-810H","note":"Method 500.6"}
+{"id":"v09","kind":"value","q":"濕度測試建議的持續天數對應到第幾百分位","gold":["98.64%"],"doc":"MIL-STD-810H","note":"Method 507.6"}
+{"id":"v10","kind":"value","q":"MIL-STD-810H 沙塵測試的塵土濃度是多少","gold":["10.6 ±7 g/m3","0.3 ±0.2 g/ft3"],"doc":"MIL-STD-810H","note":"同 v01 但問句含規範編號 —— 專測「編號摧毀向量檢索」那條路徑"}
+{"id":"v11","kind":"value","q":"MIL-STD-810H 鹽霧測試的箱體溫度是多少","gold":["95 ±3.6 °F"],"doc":"MIL-STD-810H","note":"同 v02 但含編號"}
+{"id":"v12","kind":"value","q":"引信衝擊測試的落錘高度是多少","gold":["102±5 mm"],"doc":"MIL-STD-331D","note":"Jolt arm drop height"}
+{"id":"v13","kind":"value","q":"引信測試的等效試驗負載重量是多少","gold":["230±34.5 g"],"doc":"MIL-STD-331D","note":""}
+{"id":"v14","kind":"value","q":"正弦運動控制的頻率準確度要求是多少","gold":["0.5 Hz"],"doc":"MIL-STD-331D","note":"頻率與時間準確度"}
+{"id":"v15","kind":"value","q":"引信測試的溫度量測公差是多少","gold":["1.3 mm"],"doc":"MIL-STD-331D","note":"4.5.2 量測公差段"}
+{"id":"v16","kind":"value","q":"清潔劑的標準檢驗溫度條件是多少","gold":["22 ±2 °C","72 ±4 °F"],"doc":"MIL-PRF-85570D","note":"Standard conditions"}
+{"id":"v17","kind":"value","q":"清潔化合物要倒入多大的耐壓玻璃瓶","gold":["6.4 cm"],"doc":"MIL-PRF-85570D","note":""}
+{"id":"v18","kind":"value","q":"非揮發性物質測定時烘箱要維持幾度","gold":["105 ± 2°C"],"doc":"MIL-PRF-87937D","note":"4.5.1 Nonvolatile matter"}
+{"id":"v19","kind":"value","q":"硬水儲備溶液需要溶解多少醋酸鈣","gold":["0.40 ± 0.005 g"],"doc":"MIL-PRF-87937D","note":""}
+{"id":"v20","kind":"value","q":"油耗測試時進口燃油溫度要維持在幾度","gold":["35 ± 3°C","95 ± 5°F"],"doc":"MIL-PRF-2104L","note":""}
+{"id":"v21","kind":"value","q":"油耗測試的水套出口溫度要維持在幾度","gold":["87.8 ± 3°C","190 ± 5°F"],"doc":"MIL-PRF-2104L","note":""}
+{"id":"v22","kind":"value","q":"Falex 試驗前夾具要冷卻到什麼室溫","gold":["20 ± 2 °C","68 ± 4 °F"],"doc":"MIL-PRF-63460E","note":"4.2.6 Falex"}
+{"id":"v23","kind":"value","q":"潤滑劑的磨損防止特性平均磨痕直徑上限是多少","gold":["0.8 mm"],"doc":"MIL-PRF-63460E","note":"Wear Preventive"}
+{"id":"v24","kind":"value","q":"低溫極值搭配的相對濕度假設是多少度","gold":["68.4°C"],"doc":"MIL-HDBK-310","note":"5.1.2 氣候極值"}
+{"id":"v25","kind":"value","q":"高溫高濕條件下對應的露點溫度是多少","gold":["67.8°C"],"doc":"MIL-HDBK-310","note":""}
+{"id":"v26","kind":"value","q":"可靠度測試的溫度變化率是每分鐘幾度","gold":["1.5°C"],"doc":"MIL-HDBK-781A","note":""}
+{"id":"v27","kind":"value","q":"可靠度測試選定的中間溫度層級是幾度","gold":["35.8°C"],"doc":"MIL-HDBK-781A","note":""}
+{"id":"v28","kind":"value","q":"機翼掛載的加速度需求是多少 g","gold":["7.75A"],"doc":"MIL-STD-810H","note":"Method 513.8 表格"}
+{"id":"v29","kind":"value","q":"引擎潤滑油的黏度增加百分比上限是多少","gold":["4.8%"],"doc":"MIL-PRF-2104L","note":""}
+{"id":"v30","kind":"value","q":"WC 844 推進劑點燃後測試板不得出現多大的損傷","gold":["120 ± 4 °F"],"doc":"MIL-PRF-63460E","note":""}
+{"id":"n01","kind":"none","q":"這批文件裡量子電腦的低溫維持條件是什麼","gold":[],"doc":null,"note":"語料內不存在 —— 應誠實說查不到，不得編造數值"}
+{"id":"n02","kind":"none","q":"5G 基地台的電磁曝露安全限值是多少","gold":[],"doc":null,"note":"語料內不存在"}
+{"id":"n03","kind":"none","q":"鋰電池熱失控的觸發溫度規範是多少","gold":[],"doc":null,"note":"語料內不存在"}
+{"id":"n04","kind":"none","q":"食品衛生的大腸桿菌容許值是多少","gold":[],"doc":null,"note":"完全跨領域"}
+{"id":"n05","kind":"none","q":"這份規範對區塊鏈存證的要求是什麼","gold":[],"doc":null,"note":"完全跨領域"}

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+from concurrent.futures import TimeoutError as FuturesTimeout
 import logging
 import re
 import sqlite3
@@ -210,8 +211,18 @@ def keyword_search(db: Session, query: str, top_k: int) -> List[Tuple[int, float
             terms, len(rows),
         )
         return rows
-    except Exception as e:  # 翻譯/重試失敗一律當作沒發生，維持原本的純向量行為
-        logger.warning("hybrid_search translate fallback failed, keeping vector-only: %s", e)
+    except FuturesTimeout:
+        # 逾時是最常見的失敗，而 TimeoutError 的字串是空的 —— 原本只印 %s 會變成
+        # 「translate fallback failed, keeping vector-only: 」什麼都看不出來。
+        # 這條救援路徑失敗代表中文查詢完全沒有關鍵字訊號，值得明確記錄。
+        logger.warning(
+            "hybrid_search 中翻英救援逾時（%.0fs，模型忙碌時常見）→ 本次查詢僅靠向量檢索",
+            limit,
+        )
+        return []
+    except Exception as e:  # 其他失敗一律當作沒發生，維持原本的純向量行為
+        logger.warning("hybrid_search translate fallback failed (%s): %s",
+                       type(e).__name__, e)
         return []
 
 
