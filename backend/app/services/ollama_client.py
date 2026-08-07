@@ -238,6 +238,22 @@ class OllamaClient:
                 opts["top_k"] = settings.OLLAMA_TOP_K
         except Exception:
             pass
+        # 固定隨機種子。
+        #
+        # OLLAMA_TEMPERATURE 預設是 None（從未設定），於是 Ollama 用模型自己的
+        # 預設值，生成完全不可重現。實測同一份 golden set 連跑三次得到
+        # 0.600 / 0.600 / 0.667 —— 也就是 ±1 題的差異是雜訊而非訊號。
+        # 這讓「改動前後比較」在生成層失去意義：先前有兩次 0.033 的變化被當成
+        # 真實效果解讀，實際上落在雜訊範圍內。
+        #
+        # 設 seed 才能讓相同輸入得到相同輸出（temperature=0 單獨不保證，
+        # Ollama 仍會依 seed 取樣）。預設給值以確保可重現；要恢復多樣性
+        # 把 OLLAMA_SEED 設成 None。
+        try:
+            if getattr(settings, "OLLAMA_SEED", None) is not None:
+                opts["seed"] = settings.OLLAMA_SEED
+        except Exception:
+            pass
         try:
             if settings.OLLAMA_REPEAT_PENALTY is not None:
                 opts["repeat_penalty"] = settings.OLLAMA_REPEAT_PENALTY

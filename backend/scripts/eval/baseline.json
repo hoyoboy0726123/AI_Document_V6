@@ -3,10 +3,10 @@
   "recall@20": 0.9,
   "hit@5": 0.733,
   "mrr": 0.549,
-  "retrieval_seconds": 291.7,
-  "value_grounding_rate": 0.633,
+  "retrieval_seconds": 177.9,
+  "value_grounding_rate": 0.6,
   "hallucination_rate": 0.0,
-  "generation_seconds": 297.5,
+  "generation_seconds": 504.8,
   "per_question": [
     {
       "id": "v01",

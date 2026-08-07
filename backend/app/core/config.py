@@ -44,7 +44,16 @@ class Settings(BaseSettings):
     # 生成品質沒有退化（長 context 可能出現「中間遺失」）。
     OLLAMA_NUM_CTX: int | None = 24576
     # Sampling and repetition controls (optional; set in .env if needed)
-    OLLAMA_TEMPERATURE: float | None = None
+    # 生成的可重現性。
+    #
+    # 兩者原本都是 None，於是 Ollama 用模型自己的預設值，同一個問題每次的
+    # 答案都不同。實測 golden set 連跑三次：0.600 / 0.600 / 0.667 ——
+    # ±1 題是雜訊，而我一度把兩次 0.033 的變化當成真實效果解讀。
+    #
+    # temperature=0 讓取樣趨近貪婪、seed 固定殘餘的隨機性，兩者都需要。
+    # 這是規範查詢系統：同一個問題本來就該給同一個答案，不需要多樣性。
+    OLLAMA_TEMPERATURE: float | None = 0.0
+    OLLAMA_SEED: int | None = 42
     OLLAMA_TOP_P: float | None = None
     OLLAMA_TOP_K: int | None = None
     OLLAMA_REPEAT_PENALTY: float | None = None

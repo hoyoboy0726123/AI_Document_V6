@@ -571,7 +571,9 @@ def _grounded_synthesis(
     ans, sources, n_used, n_total = _synthesize_grounded(
         db, question, rag_evidence, kg_notes, conversation_history)
     if not ensure_values:
-        return ans, sources, n_used, n_total
+        return _flag_unsourced_values(
+            ans, [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
+        ), sources, n_used, n_total
 
     # 補查輪數是「整個請求」共用的預算，不是每個呼叫點各自 3 輪。
     # 單次 agent 執行會經過多個合成點，各跑各的會累積成十幾次 LLM 生成，
@@ -621,7 +623,61 @@ def _grounded_synthesis(
             db, question, evidence, kg_notes, conversation_history)
         if new_ans:
             ans, sources, n_used, n_total = new_ans, new_sources, new_used, new_total
+    # 補查迴圈已結束，此時才做來源查核（放在迴圈內會讓警示文字
+    # 干擾 _needs_deeper_search 的判斷，見 _synthesize_grounded 的註解）。
+    ans = _flag_unsourced_values(ans, [{"text": e.get("snippet") or e.get("text") or ""}
+                                       for e in rag_evidence])
     return ans, sources, n_used, n_total
+
+
+# 單位的中英對照。模型常把單位翻成中文，或把單位放進表格欄名，
+# 比對時要先正規化，否則會把「有依據」的數值誤判成沒依據。
+_UNIT_ZH = [("m/s", ["米/秒", "公尺/秒"]), ("mm", ["毫米", "公釐"]), ("cm", ["公分", "厘米"]),
+            ("kg", ["公斤", "千克"]), ("g", ["克"]), ("hours", ["小時"]),
+            ("minutes", ["分鐘"]), ("days", ["天"]), ("°c", ["攝氏"])]
+
+
+def _norm_for_match(s: str) -> str:
+    t = re.sub(r"\s+", "", s or "").lower().replace("º", "°").replace("³", "3").replace("²", "2")
+    for canon, zhs in _UNIT_ZH:
+        for z in zhs:
+            t = t.replace(z, canon)
+    return t
+
+
+def _flag_unsourced_values(answer: Optional[str], contexts: List[Dict[str, Any]]) -> Optional[str]:
+    """標出「答案裡有、但脈絡中找不到」的數值。
+
+    為什麼需要確定性查核：
+      * 分數型防線擋不住「主題無關但用詞像規範」的問題 —— 實測
+        「5G 基地台的電磁曝露安全限值」CE 信心 0.655，遠高於門檻。
+      * 追問時模型會整句照抄前一輪的內容，連數值一起帶過來，掛到本輪
+        完全不同的來源上（實測「標準大氣條件 23±2°C、50±5% RH」掛在一個
+        不含這些值的來源）。使用者回頭查證會翻不到，看起來像幻覺。
+    提示詞約束對這兩種都無效（實測模型不遵守），所以改用事後比對。
+
+    刻意「只標註、不刪改」：答案的敘述可能是對的、只是數值換算過或表格
+    重排，直接刪句子會把好答案弄壞。標註讓使用者知道哪個數字要自己查證 ——
+    對「拿這些值去寫測試計畫」這個用途，這比悄悄修掉更有用。
+    """
+    if not answer or not contexts:
+        return answer
+    haystack = _norm_for_match(" ".join(c.get("text") or "" for c in contexts))
+    unsourced: List[str] = []
+    for m in _VALUE_TOKEN_RE.finditer(answer):
+        raw = m.group(0)
+        core = re.match(r"^([\d.]+(?:±[\d.]+)?)", _norm_for_match(raw))
+        if not core:
+            continue
+        if core.group(1) not in haystack:
+            v = re.sub(r"\s+", " ", raw).strip()
+            if v not in unsourced:
+                unsourced.append(v)
+    if not unsourced:
+        return answer
+    logger.info("答案含 %d 個脈絡中查不到的數值：%s", len(unsourced), unsourced[:5])
+    return (answer.rstrip() + "\n\n⚠️ 下列數值未能在本次引用的段落中找到，請自行查證："
+            + "、".join(unsourced[:8]))
 
 
 def _synthesize_grounded(
@@ -713,6 +769,11 @@ def _synthesize_grounded(
         system_prompt=prompts["system_prompt"],
         user_template=prompts["user_template"],
     )
+    # 注意：查核**不能**放在這裡。本函式在補查迴圈內會被反覆呼叫，而查核附加的
+    # 警示文字本身含有數值（「…請自行查證：72 小時」），下一輪的
+    # _needs_deeper_search 會因此判定「答案已經有數值」而不再補查 ——
+    # 等於警示訊息把補救機制關掉了（實測數值落地率因此掉 1 題）。
+    # 查核改在 _grounded_synthesis 的迴圈結束後做一次。
     return answer, used_sources, n_rag_used, total_unique
 
 
