@@ -76,6 +76,8 @@ def main() -> None:
     ap.add_argument("--snippet", type=int, default=0, help="覆寫 rerank snippet 字元數")
     ap.add_argument("--pool", type=int, default=0, help="覆寫 rerank pool 大小")
     ap.add_argument("--label", default="", help="這次設定的說明，印在結果最前面")
+    ap.add_argument("--min-sim", type=float, default=-1.0, help="覆寫向量相似度門檻")
+    ap.add_argument("--page-gap", type=int, default=0, help="覆寫 context 頁距視窗")
     ap.add_argument("--no-rerank", action="store_true",
                     help="關掉 cross-encoder，量測 rerank 到底貢獻多少")
     args = ap.parse_args()
@@ -89,6 +91,15 @@ def main() -> None:
         _st.RAG_RERANK_POOL = args.pool
     if args.label:
         print(f"### {args.label}")
+
+    if args.min_sim >= 0:
+        import app.services.retrieval as _rt  # noqa: PLC0415
+        _orig = _rt._get_vector_config
+        _rt._get_vector_config = lambda db, vc: {**_orig(db, vc),
+                                                 "min_similarity_score": args.min_sim}
+    if args.page_gap:
+        import app.services.retrieval as _rt2  # noqa: PLC0415
+        _rt2._PAGE_GAP = args.page_gap
 
     if args.no_guarantee_top:
         from app.core.config import settings  # noqa: PLC0415

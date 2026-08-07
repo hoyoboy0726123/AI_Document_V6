@@ -73,19 +73,23 @@ def _get_cross_encoder():
             model_name = getattr(settings, "RAG_RERANK_MODEL", "BAAI/bge-reranker-base")
             _device = _resolve_device()
             logger.info("rerank: loading cross-encoder %s (%s) ...", model_name, _device)
-            # 離線優先：已快取就免連網（秒載、無網路也可用，利於打包 .exe）；沒快取再允許下載。
-            prev = os.environ.get("HF_HUB_OFFLINE")
+            # 離線優先：已快取就免連網（秒載、無網路也可用，利於打包 .exe）；
+            # 沒快取再允許下載。
+            #
+            # 原本是在函式內設 os.environ["HF_HUB_OFFLINE"]，但那完全無效 ——
+            # huggingface_hub 在 **import 時** 就把它讀成模組常數：
+            #     import 時 HF_HUB_OFFLINE 常數 = False
+            #     執行期設環境變數後        = False   ← 沒變
+            # 於是每次冷啟都會實際連 HuggingFace（審查實測約 15 次 HTTP 請求、
+            # 首次檢索 45.88 秒，暖機後 0.42 秒），對打包成單檔 .exe 離線部署
+            # 是實際風險。
+            # CrossEncoder 本身支援 local_files_only 參數，用它才真的有效。
             try:
-                os.environ["HF_HUB_OFFLINE"] = "1"
+                _CE_MODEL = CrossEncoder(model_name, device=_device, max_length=512,
+                                         local_files_only=True)
+            except Exception as offline_exc:  # noqa: BLE001
+                logger.info("rerank: 本地無快取（%s），改為允許下載", type(offline_exc).__name__)
                 _CE_MODEL = CrossEncoder(model_name, device=_device, max_length=512)
-            except Exception:
-                os.environ["HF_HUB_OFFLINE"] = "0"
-                _CE_MODEL = CrossEncoder(model_name, device=_device, max_length=512)
-            finally:
-                if prev is None:
-                    os.environ.pop("HF_HUB_OFFLINE", None)
-                else:
-                    os.environ["HF_HUB_OFFLINE"] = prev
             logger.info("rerank: cross-encoder loaded")
             return _CE_MODEL
         except Exception as e:

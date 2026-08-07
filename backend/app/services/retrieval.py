@@ -20,6 +20,15 @@ from .. import models
 from ..core.config import settings
 from . import ai, hybrid_search, rerank
 
+# context_keep_ids 的頁距視窗。
+#
+# 外部審查建議放寬到 ~15（理由是 810H 單一 Method 常跨 20+ 頁）。實測 5/10/15
+# 的檢索層指標完全相同、25 才變差 —— 但這**不代表它沒作用**：這個值影響的是
+# 「哪些區塊進 LLM 脈絡」，而檢索層指標（recall@20 / hit@5 / MRR）只量到
+# hybrid_retrieve 為止，根本沒經過 context_keep_ids。
+#
+# 要驗證它必須用生成層指標（數值落地率），也就是 run_eval.py --with-generation。
+# 在有那個數字之前不要動它 —— 憑「理論上太窄」去調，正是今天被打臉三次的模式。
 _PAGE_GAP = 5
 
 

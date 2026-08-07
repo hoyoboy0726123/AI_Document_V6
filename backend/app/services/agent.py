@@ -168,7 +168,14 @@ _NO_ANSWER_RE = re.compile(
 _SUBJECT_RE = re.compile(
     r"MIL-STD|MIL-DTL|MIL-PRF|MIL-HDBK|ISO|IEC|IEEE|ASTM|Method\s*\d{3}(?:\.\d+)?|方法\s*\d{3}(?:\.\d+)?|\d{3}\.\d"
     r"|高溫|低溫|溫度衝擊|濕度|鹽霧|砂塵|沙塵|振動|震動|衝擊|加速度|太陽|輻射|黴菌|真菌"
-    r"|淋雨|降雨|低壓|高度|爆炸|酸性|結冰|凍雨|運輸|噪音|彈跳|落下|傾斜",
+    r"|淋雨|降雨|低壓|高度|爆炸|酸性|結冰|凍雨|運輸|噪音|彈跳|落下|傾斜"
+    # 英文測試名稱。原本白名單只有中文，於是
+    #     "What are the test conditions for the salt fog test?"
+    # 被判成「沒有指名測試類型」而觸發反問 —— 問題明明點名了 salt fog。
+    # 實測 _lacks_subject=True 且 _wants_values=True，直接走反問路徑。
+    r"|salt\s*fog|humidity|vibration|shock|temperature|altitude|low\s*pressure"
+    r"|sand\s*and\s*dust|blowing\s*(?:sand|dust)|fungus|mold|solar|rain|icing"
+    r"|acidic|explosive|acceleration|gunfire|freeze|thaw|immersion|noise",
     re.I,
 )
 
@@ -652,16 +659,23 @@ def _synthesize_grounded(
     contexts: List[Dict[str, Any]] = []
     used_sources: List[Dict[str, Any]] = []  # 供前端可點/可預覽的結構化來源（對齊 RAG）
     used = 0
+    # 頁距要真的算出來。原本 agent 路徑一律寫 None，於是提示詞裡整整一條
+    # 「標記⚠️頁距的來源極可能屬於不同測試項目…優先捨棄」的防污染規則
+    # 在 agent 模式下是死的 —— 而 agent 恰恰最需要它：證據來自 seed 檢索、
+    # LLM 自由 rag_search、補查、KG 子項四個來源混合，頁碼跨度遠大於純 RAG。
+    primary_page = next((e.get("page") for e, _ in deduped if e.get("page")), None)
     for ev, text in deduped:
         if used + len(text) > budget:
             text = text[: max(0, budget - used)]
         if not text:
             break
+        ev_page = ev.get("page")
         contexts.append({
             "source_num": len(contexts) + 1,
             "title": ev.get("title") or "",
-            "page": ev.get("page"),
-            "page_gap": None,
+            "page": ev_page,
+            "page_gap": (abs(ev_page - primary_page)
+                         if primary_page and ev_page else None),
             "text": text,
         })
         used_sources.append({
@@ -1495,7 +1509,19 @@ def run_agent(
     # KG ⊇ RAG：section_lookup 命中 → 答案 = 知識圖譜的權威外部規範清單（結構化、純 RAG 給不了）
     #          ＋ RAG 合成的內容（內部章節/程序性引用等）。Agent 模式作為 RAG 的超集，故兩者都納入。
     # KG 段以確定性方式產出（不靠 gemma4 合成，否則會被 RAG 片段蓋過而漏掉外部規範）。
-    if not is_app and section_lookup_obs and section_lookup_obs.get("referenced_standards"):
+    # 兩道守衛 —— 與下方 spec_center 路徑一致，先前只有 section_lookup 這條漏掉。
+    #
+    # (1) 必須是關係題。實測問「鹽霧測試的測試條件與持續時間」時，LLM 探索途中
+    #     挑錯方法（鹽霧是 509.7，它呼叫了 510.7 砂塵）就把 section_lookup_obs
+    #     無條件設定，最終答案的主體變成「METHOD 510.7 全章節引用的外部規範，
+    #     共 6 項」，真正的答案被降級成「── 補充（文件內容檢索）──」。
+    # (2) 該方法號必須真的出現在問句裡。LLM 挑錯方法時不該由它決定答案主體。
+    _sec_name = str(section_lookup_obs.get("name") or section_lookup_obs.get("matched") or "") \
+        if section_lookup_obs else ""
+    _sec_num = re.search(r"\d{3}\.\d{1,2}", _sec_name)
+    _named_by_user = bool(_sec_num and _sec_num.group(0) in (question or ""))
+    if (not is_app and section_lookup_obs and section_lookup_obs.get("referenced_standards")
+            and _RELATION_RE.search(question or "") and _named_by_user):
         nm = section_lookup_obs.get("name") or section_lookup_obs.get("matched")
         cite: Dict[str, set] = {}
         for item in (section_lookup_obs.get("by_section") or []):
@@ -1622,7 +1648,16 @@ def run_agent(
                 if isinstance(obs, dict) and "error" not in obs:
                     kg_notes.append("spec_references → " + json.dumps(obs, ensure_ascii=False)[:900])
                     kg_edges_seen += len(obs.get("outgoing", [])) + len(obs.get("incoming", []))
-            synth, syn_sources, n_used = _synthesize()
+            # 只在新結果有內容時才覆寫。
+            #
+            # 原本無條件覆寫，而 _synthesize 內部的 except 會把失敗吞成
+            # (None, [], 0)。第三個 weak 條件（答案很好、只是 CE 信心低且沒有
+            # KG note）成立時，若補充輪的合成失敗，**第一次的好答案就被丟掉**，
+            # 流程落到「保留 ReAct 迴圈自己的 final_text」。
+            # _grounded_synthesis 內的同類迴圈本來就有 if new_ans 保護，這裡沒有。
+            _new = _synthesize()
+            if _new[0]:
+                synth, syn_sources, n_used = _new
         except Exception as e:
             logger.warning("agent supplement round failed: %s", e)
 

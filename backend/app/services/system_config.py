@@ -47,7 +47,20 @@ DEFAULT_RAG_USER_TEMPLATE = """\
 DEFAULT_VECTOR_CONFIG = {
     "overlap_chars": 250,  # 向量塊重疊字符數（0 表示取消）
     "max_chars": 1800,  # 向量塊最大字符數
-    "min_similarity_score": 0.3,  # 向量匹配閾值
+    # 向量匹配閾值 —— 實際上是無效的，保留 0.3 只是為了不動既有行為。
+    #
+    # qwen3-embedding:8b 的向量已 L2 正規化，餘弦分數分佈極窄，離題問題也遠高
+    # 於 0.3（實測「紅燒獅子頭的食譜」top5 相似度 0.345~0.353）。
+    # golden set 30 題掃描：
+    #     0.0（等於關掉） hit@5 0.733  MRR 0.549
+    #     0.3（現行）     hit@5 0.733  MRR 0.549   <- 與關掉完全相同
+    #     0.55           hit@5 0.733  MRR 0.549   <- 外部審查建議值，同樣無差異
+    #     0.65           hit@5 0.700  MRR 0.533   <- 開始砍到正解
+    #
+    # 也就是說：調高沒有好處，再高就開始傷害。真正在擋不相關結果的是
+    # RAG_LOWCONF_CE_THRESHOLD（cross-encoder gate），不是這個值。
+    # 換 embedding 模型後這個數字的意義會完全改變，不要把它當成有效的保護。
+    "min_similarity_score": 0.3,
     "default_top_k": 5,  # 預設返回來源數量
     "search_multiplier": 10,  # 搜索倍數
 }
