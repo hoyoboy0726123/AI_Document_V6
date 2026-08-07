@@ -22,14 +22,17 @@ from . import ai, hybrid_search, rerank
 
 # context_keep_ids 的頁距視窗。
 #
-# 外部審查建議放寬到 ~15（理由是 810H 單一 Method 常跨 20+ 頁）。實測 5/10/15
-# 的檢索層指標完全相同、25 才變差 —— 但這**不代表它沒作用**：這個值影響的是
-# 「哪些區塊進 LLM 脈絡」，而檢索層指標（recall@20 / hit@5 / MRR）只量到
-# hybrid_retrieve 為止，根本沒經過 context_keep_ids。
+# 這個值用檢索層指標（recall@20 / hit@5 / MRR）永遠驗不出來 —— 它作用在
+# context_keep_ids，而那些指標只量到 hybrid_retrieve 為止。必須用生成層診斷。
 #
-# 要驗證它必須用生成層指標（數值落地率），也就是 run_eval.py --with-generation。
-# 在有那個數字之前不要動它 —— 憑「理論上太窄」去調，正是今天被打臉三次的模式。
-_PAGE_GAP = 5
+# 實測（scripts/eval/diag_generation.py，兩題「正解進了 top-5 卻沒進脈絡」）：
+#     v11 鹽霧箱體溫度  top5 頁碼 [261, 255★, 259, 256, 977]  正解距主命中 6 頁
+#     v16 清潔劑標準條件 top5 頁碼 [19, 20, 9, 10★, 11]        正解距主命中 9 頁
+#     PAGE_GAP=5   兩題的正解都被擋在脈絡外（檢索排第 2 / 第 4 名卻沒送進 LLM）
+#     PAGE_GAP=15  兩題都進得去；30 / 60 沒有進一步差別
+#
+# 810H 單一 Method 常跨 20+ 頁，±5 的視窗對這種語料本來就太窄。
+_PAGE_GAP = 15
 
 
 def _project_matches(metadata: Dict[str, object], project_id: str) -> bool:

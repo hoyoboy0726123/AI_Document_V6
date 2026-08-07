@@ -45,6 +45,50 @@ def norm(v: str) -> str:
     return s.replace("º", "°").replace("³", "3").replace("²", "2")
 
 
+# 單位的中文寫法。模型回答時常把單位翻成中文，或把單位放進表格欄名，
+# 若要求「數值＋單位」的字串完全一致，會把答對的判成答錯。
+_UNIT_ALIASES = [
+    ("m/s", ["米/秒", "公尺/秒", "米每秒"]),
+    ("mm", ["毫米", "公釐"]),
+    ("cm", ["公分", "厘米"]),
+    ("g", ["克"]),
+    ("kg", ["公斤", "千克"]),
+    ("hours", ["小時"]),
+    ("minutes", ["分鐘"]),
+    ("days", ["天", "日"]),
+    ("°c", ["度c", "攝氏"]),
+    ("%", ["百分比", "％"]),
+]
+
+
+def _numeric_core(v: str) -> str:
+    """取出數值主體（含 ± 與小數），丟掉單位。
+
+    生成層比對改用這個，而不是「數值＋單位」完全相符。實測有兩題被誤判：
+        v03 期望 "4.6 m/s"      答案寫「不得低於 4.6 米/秒（900 英尺/分鐘）」
+        v19 期望 "0.40 ± 0.005 g" 答案的表格欄名是「醋酸鈣用量（克）」，值是 0.40 ± 0.005
+    兩題其實都答對了，只是單位被翻成中文或移到欄名。
+
+    數值主體本身鑑別力已經足夠（"0.40±0.005"、"10.6±7" 這種字串幾乎不會巧合），
+    誤判成功的風險遠低於原本誤判失敗的風險。
+    """
+    s = norm(v)
+    for canon, zh in _UNIT_ALIASES:
+        for z in zh:
+            s = s.replace(norm(z), canon)
+    m = re.match(r"^([\d.]+(?:±[\d.]+)?)", s)
+    return m.group(1) if m else s
+
+
+def gold_hit(gold_list: list, text: str) -> bool:
+    """答案是否包含任一 gold 值（以數值主體比對，容許單位被翻譯或移位）。"""
+    t = norm(text)
+    for canon, zh in _UNIT_ALIASES:
+        for z in zh:
+            t = t.replace(norm(z), canon)
+    return any(_numeric_core(g) and _numeric_core(g) in t for g in gold_list)
+
+
 def gold_chunk_ids(con: sqlite3.Connection, golds: list) -> set:
     """由 gold 數值反推「哪些區塊算正解」。
 
@@ -186,7 +230,7 @@ def main() -> None:
         t1 = time.perf_counter()
         for it in val_items:
             ans, _src = retrieval_answer(db, it["q"])
-            ok = any(norm(g) in norm(ans) for g in it["gold"])
+            ok = gold_hit(it["gold"], ans)
             grounded += int(ok)
         for it in none_items:
             ans, _src = retrieval_answer(db, it["q"])
