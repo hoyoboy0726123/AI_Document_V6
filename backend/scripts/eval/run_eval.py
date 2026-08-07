@@ -80,6 +80,19 @@ def _numeric_core(v: str) -> str:
     return m.group(1) if m else s
 
 
+# 「系統誠實表示查不到」的開場白。兜底訊息會引用最接近的原文片段，那些片段
+# 裡本來就有數字 —— 若只用 has_values() 判斷，會把「正確地說查不到」誤判成幻覺。
+# 這是本評測第三次因為指標與要驗的東西沒對齊而誤導判斷，所以特別列成常數。
+_LOWCONF_MARKERS = ("⚠️", "查無相關資料", "查無足夠", "沒有找到", "檢索信心偏低",
+                    "可能不直接相關", "無法回答")
+
+
+def is_honest_no_answer(text: str) -> bool:
+    """答案是否為「誠實表示查不到」——只看開頭，避免正文提到查無而誤判。"""
+    head = (text or "").strip()[:120]
+    return any(m in head for m in _LOWCONF_MARKERS)
+
+
 def gold_hit(gold_list: list, text: str) -> bool:
     """答案是否包含任一 gold 值（以數值主體比對，容許單位被翻譯或移位）。"""
     t = norm(text)
@@ -235,7 +248,9 @@ def main() -> None:
         for it in none_items:
             ans, _src = retrieval_answer(db, it["q"])
             # 語料內不存在的題目，答案不該出現任何帶單位的數值
-            hallucinated += int(has_values(ans))
+            # 幻覺 = 「沒有誠實說查不到」且「給出了帶單位的數值」。
+            # 少了前半個條件，兜底訊息裡引用的原文數字會被誤判成編造。
+            hallucinated += int(not is_honest_no_answer(ans) and has_values(ans))
         result["value_grounding_rate"] = round(grounded / n, 3) if n else 0
         result["hallucination_rate"] = round(hallucinated / len(none_items), 3) if none_items else 0
         result["generation_seconds"] = round(time.perf_counter() - t1, 1)

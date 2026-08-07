@@ -794,6 +794,29 @@ def run_rag_only(db: Session, question: str,
                  conversation_history: Optional[List[Dict[str, Any]]] = None):
     """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。"""
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
+
+    # 低信心兜底 —— 這道防線原本只存在於 rag.py 的 /query 端點，這裡漏了，
+    # 而本函式正是「混合模式路由到 RAG 分支」時實際跑的程式碼。
+    #
+    # 後果是同一個離題問題，純 RAG 模式會誠實說查不到，混合模式卻編出數值：
+    #     「這批文件裡量子電腦的低溫維持條件是什麼」CE 信心 0.094（門檻 0.15）
+    #     → 仍答出「低溫測試條件為 -65°F (-54°C)…」，把某個規範的冷卻流體
+    #       溫度安到量子電腦上。對照組 n03/n04/n05 信心更低才沒編。
+    #
+    # docstring 寫「與 /rag/query 同一條」卻少了這段，是最容易漏掉的那種不一致。
+    # _seed_evidence_via_rag 回傳的 conf 本來就是最相關段落的 cross-encoder 分數，
+    # 直接用即可（CE 不可用時為 None，照常作答，與 /query 端點一致）。
+    if seeded:
+        _thr = getattr(settings, "RAG_LOWCONF_CE_THRESHOLD", 0.15)
+        if _conf is not None and _conf < _thr:
+            closest = [{"title": ev.get("title"), "page": ev.get("page"),
+                        "text": ev.get("snippet")} for ev in seeded[:3]]
+            low_src = [{"document_id": ev.get("document_id"), "title": ev.get("title"),
+                        "page": ev.get("page"), "snippet": ev.get("snippet"),
+                        "score": ev.get("score")} for ev in seeded[:5]]
+            logger.info("run_rag_only 低信心兜底：CE=%.3f < %.2f", _conf, _thr)
+            return ai.low_confidence_answer(question, closest), low_src
+
     ans, sources, n_used, n_total = _grounded_synthesis(db, question, seeded, [], conversation_history,
                                                     retry_budget=_new_retry_budget())
     if ans and ans.strip():
