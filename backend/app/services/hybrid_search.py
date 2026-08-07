@@ -31,6 +31,7 @@ from . import vector_store
 logger = logging.getLogger(__name__)
 
 _FTS_TABLE = "chunk_fts"
+_FTS_META = "chunk_fts_meta"
 _BUILD_LOCK = threading.Lock()
 
 # trigram tokenizer 需要 token 長度 ≥ 3 才能命中
@@ -73,19 +74,63 @@ def _ensure_index(conn: sqlite3.Connection, *, force: bool = False) -> bool:
             f"CREATE VIRTUAL TABLE {_FTS_TABLE} USING fts5(text, tokenize = 'trigram')"
         )
 
-    src_n = cur.execute("SELECT count(*) FROM document_chunks").fetchone()[0]
-    fts_n = (
-        cur.execute(f"SELECT count(*) FROM {_FTS_TABLE}").fetchone()[0] if exists else 0
-    )
-    if force or not exists or src_n != fts_n:
+    # 同步判斷改用「內容指紋」而非只比列數。
+    #
+    # 只比列數有兩個問題：
+    #   1. 重新抽取一份文件是「刪 N 筆再加 N 筆」，列數不變 → FTS 永遠比對舊
+    #      文字，並回傳已不存在的 faiss_id（在 pool 迴圈被靜默丟棄，白白吃掉
+    #      候選名額）。今天重抽了 40 次，這個風險是實際的。
+    #   2. 來源計數沒有加 WHERE faiss_id IS NOT NULL，但 INSERT 有 —— 只要出現
+    #      一筆 NULL，兩數永遠不相等，於是**每一次查詢都會全量重建**（實測
+    #      7558 列要 11.4 秒，而且握著鎖）。
+    #
+    # 指紋取 (列數, 文字總長, 最後更新時間)：內容換掉但列數相同時總長極難剛好
+    # 一致，加上 updated_at 幾乎不可能碰撞。成本是一次聚合查詢（毫秒級）。
+    fingerprint = str(cur.execute(
+        "SELECT count(*), COALESCE(SUM(LENGTH(text)),0), COALESCE(MAX(updated_at),'') "
+        "FROM document_chunks WHERE faiss_id IS NOT NULL"
+    ).fetchone())
+
+    cur.execute(f"CREATE TABLE IF NOT EXISTS {_FTS_META} (k TEXT PRIMARY KEY, v TEXT)")
+    prev = cur.execute(f"SELECT v FROM {_FTS_META} WHERE k='fingerprint'").fetchone()
+    stale = (prev is None) or (prev[0] != fingerprint)
+
+    if force or not exists or stale:
         cur.execute(f"DELETE FROM {_FTS_TABLE}")
         cur.execute(
             f"INSERT INTO {_FTS_TABLE}(rowid, text) "
             f"SELECT faiss_id, text FROM document_chunks WHERE faiss_id IS NOT NULL"
         )
+        cur.execute(f"INSERT OR REPLACE INTO {_FTS_META}(k, v) VALUES('fingerprint', ?)",
+                    (fingerprint,))
         conn.commit()
-        logger.info("hybrid_search: FTS index rebuilt (%d rows)", src_n)
+        n = cur.execute(f"SELECT count(*) FROM {_FTS_TABLE}").fetchone()[0]
+        logger.info("hybrid_search: FTS index rebuilt (%d rows)", n)
     return True
+
+
+# 在 MIL-STD 語料中沒有鑑別力的詞。
+#
+# 關鍵是 trigram tokenizer 做的是**子字串比對**：`"mil"` 會命中每一個含
+# "mil" 的位置，而 MIL-STD-810H 的頁首每頁都有。實測「MIL-STD-810H 沙塵
+# 測試濃度」被拆成 `"mil" OR "std" OR "810h" OR "沙塵測試濃度"`，BM25 回傳
+# 50 筆分數幾乎一致（-4.49 ~ -4.36）的結果 —— 那是 50 筆隨機噪音，而 RRF
+# 還會獎勵它們（兩張名單都上榜的噪音佔滿了 rerank 的候選名額）。
+#
+# 規範編號本身有鑑別力，所以整串保留（見下方 _SPEC_TOKEN_RE），只濾掉
+# 拆碎後的無意義片段與英文虛詞。
+# 刻意只列「可證明是錯的」那些：mil / std / hdbk / dtl / prf 是規範編號被
+# [A-Za-z0-9]{3,} 拆碎後的殘片，本身不是使用者輸入的詞。
+#
+# 一度連 test / method / standard / requirement 這些也濾掉，但那是「憑直覺
+# 認為沒有鑑別力」——golden set 量測顯示那一版 recall 反而少 1 題。它們是
+# 使用者真正輸入的內容詞，濾掉會連帶砍掉訊號。沒有量測支持就不要擴大。
+_BM25_STOPWORDS = {"mil", "std", "hdbk", "dtl", "prf"}
+# 規範編號整串當一個 term，不要被 [A-Za-z0-9]{3,} 拆成 mil / std / 810h
+_SPEC_TOKEN_RE = re.compile(
+    r"MIL-(?:STD|HDBK|DTL|PRF)-\d+[A-Z]?(?:-\d+)?|AR\s?\d+-\d+|ASTM\s?[A-Z]?\d+",
+    re.I,
+)
 
 
 def _build_match(query: str) -> Optional[str]:
@@ -95,9 +140,17 @@ def _build_match(query: str) -> Optional[str]:
     terms: List[str] = []
     # 帶小數的數字整體保留（高鑑別力，能獨指某一列）
     terms.extend(_DECIMAL_RE.findall(query))
-    for tok in _EN_TOKEN_RE.findall(query):
-        terms.append(tok.lower())
-    terms.extend(_CJK_RUN_RE.findall(query))
+    # 規範編號整串保留，並從後續 token 化的來源字串中移除
+    spec_ids = _SPEC_TOKEN_RE.findall(query)
+    terms.extend(s.upper() for s in spec_ids)
+    # 小數已整串保留，其整數部分（101.78 的 101）不要再當一個 term ——
+    # 純數字片段在 trigram 下鑑別力極低，只會稀釋 BM25 排序。
+    rest = _DECIMAL_RE.sub(" ", _SPEC_TOKEN_RE.sub(" ", query))
+    for tok in _EN_TOKEN_RE.findall(rest):
+        low = tok.lower()
+        if low not in _BM25_STOPWORDS:
+            terms.append(low)
+    terms.extend(_CJK_RUN_RE.findall(rest))
     seen: List[str] = []
     for t in terms:
         if t not in seen:
@@ -150,18 +203,23 @@ def _translate_for_keyword(query: str) -> str:
 
 
 def _fts_query(path: str, match: str, top_k: int) -> List[Tuple[int, float]]:
-    with _BUILD_LOCK:
-        conn = _connect(path)
-        try:
+    # 鎖只包「確保索引存在／重建」，不包查詢本身。
+    #
+    # 原本整段都在 _BUILD_LOCK 內，所有關鍵字查詢因而完全序列化（實測 8 個
+    # 並行查詢與 8 個序列查詢耗時相同，加速比 0.96x）。平常每次 27ms 看不出來，
+    # 但一旦觸發全量重建（11.4 秒），所有並行請求全部排隊等它。
+    conn = _connect(path)
+    try:
+        with _BUILD_LOCK:
             _ensure_index(conn)
-            rows = conn.execute(
-                f"SELECT rowid, bm25({_FTS_TABLE}) AS s "
-                f"FROM {_FTS_TABLE} WHERE {_FTS_TABLE} MATCH ? "
-                f"ORDER BY s LIMIT ?",
-                (match, top_k),
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = conn.execute(
+            f"SELECT rowid, bm25({_FTS_TABLE}) AS s "
+            f"FROM {_FTS_TABLE} WHERE {_FTS_TABLE} MATCH ? "
+            f"ORDER BY s LIMIT ?",
+            (match, top_k),
+        ).fetchall()
+    finally:
+        conn.close()
     return [(int(r[0]), float(r[1])) for r in rows]
 
 

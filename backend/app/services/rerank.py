@@ -174,6 +174,11 @@ def _score_llm(query: str, candidates) -> Optional[dict]:
 
 
 def _guarantee_fused_top(candidates, result, top_n):
+    # 可關閉：實測 rerank 的 MRR 比不 rerank 還低，懷疑是這道保底把
+    # cross-encoder 判為不相關的塊硬塞到第 1 名所致（審查實測有一例
+    # CE 分數 0.172 vs 最佳 0.998 被放到位置 0，連帶污染 primary_page 的頁距視窗）。
+    if not getattr(settings, "RAG_RERANK_GUARANTEE_TOP", True):
+        return result[:top_n]
     """保底：融合(向量+BM25)排第 1 的候選必須留在最終結果裡。
 
     rerank 對「數字表 / 跨語言 / 精準關鍵字命中」評分常不準，可能把融合第 1 名（例如

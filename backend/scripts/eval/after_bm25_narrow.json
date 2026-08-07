@@ -1,15 +1,15 @@
 {
   "n_value_questions": 30,
   "recall@20": 0.9,
-  "hit@5": 0.733,
-  "mrr": 0.549,
-  "retrieval_seconds": 145.9,
+  "hit@5": 0.7,
+  "mrr": 0.447,
+  "retrieval_seconds": 178.7,
   "per_question": [
     {
       "id": "v01",
       "q": "沙塵測試的塵土濃度是多少",
       "recall": true,
-      "rank": 1,
+      "rank": 2,
       "n_gold_chunks": 4
     },
     {
@@ -37,14 +37,14 @@
       "id": "v05",
       "q": "標準大氣條件下的溫度與相對濕度是多少",
       "recall": true,
-      "rank": 0,
+      "rank": 5,
       "n_gold_chunks": 1
     },
     {
       "id": "v06",
       "q": "受控環境的溫度公差與相對濕度規定是什麼",
       "recall": true,
-      "rank": 5,
+      "rank": 0,
       "n_gold_chunks": 1
     },
     {
@@ -72,14 +72,14 @@
       "id": "v10",
       "q": "MIL-STD-810H 沙塵測試的塵土濃度是多少",
       "recall": true,
-      "rank": 1,
+      "rank": 3,
       "n_gold_chunks": 4
     },
     {
       "id": "v11",
       "q": "MIL-STD-810H 鹽霧測試的箱體溫度是多少",
       "recall": true,
-      "rank": 2,
+      "rank": 3,
       "n_gold_chunks": 1
     },
     {
@@ -100,7 +100,7 @@
       "id": "v14",
       "q": "正弦運動控制的頻率準確度要求是多少",
       "recall": true,
-      "rank": 1,
+      "rank": 2,
       "n_gold_chunks": 2
     },
     {
@@ -114,7 +114,7 @@
       "id": "v16",
       "q": "清潔劑的標準檢驗溫度條件是多少",
       "recall": true,
-      "rank": 4,
+      "rank": 0,
       "n_gold_chunks": 1
     },
     {
@@ -128,7 +128,7 @@
       "id": "v18",
       "q": "非揮發性物質測定時烘箱要維持幾度",
       "recall": true,
-      "rank": 1,
+      "rank": 2,
       "n_gold_chunks": 2
     },
     {
@@ -163,7 +163,7 @@
       "id": "v23",
       "q": "潤滑劑的磨損防止特性平均磨痕直徑上限是多少",
       "recall": true,
-      "rank": 1,
+      "rank": 2,
       "n_gold_chunks": 4
     },
     {

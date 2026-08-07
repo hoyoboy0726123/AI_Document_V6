@@ -71,7 +71,34 @@ def main() -> None:
     ap.add_argument("--recall-k", type=int, default=20)
     ap.add_argument("--out", default="")
     ap.add_argument("--baseline", default="")
+    ap.add_argument("--no-guarantee-top", action="store_true",
+                    help="關掉『融合第1名保底置頂』，量測它是否污染排序")
+    ap.add_argument("--snippet", type=int, default=0, help="覆寫 rerank snippet 字元數")
+    ap.add_argument("--pool", type=int, default=0, help="覆寫 rerank pool 大小")
+    ap.add_argument("--label", default="", help="這次設定的說明，印在結果最前面")
+    ap.add_argument("--no-rerank", action="store_true",
+                    help="關掉 cross-encoder，量測 rerank 到底貢獻多少")
     args = ap.parse_args()
+
+    from app.core.config import settings as _st  # noqa: PLC0415
+    if args.snippet:
+        _st.RAG_RERANK_SNIPPET_CHARS = args.snippet
+        import app.services.rerank as _rr  # noqa: PLC0415
+        _rr._SNIPPET_CHARS = args.snippet
+    if args.pool:
+        _st.RAG_RERANK_POOL = args.pool
+    if args.label:
+        print(f"### {args.label}")
+
+    if args.no_guarantee_top:
+        from app.core.config import settings  # noqa: PLC0415
+        settings.RAG_RERANK_GUARANTEE_TOP = False
+        print("（已關閉 融合第1名保底置頂）")
+
+    if args.no_rerank:
+        from app.core.config import settings  # noqa: PLC0415
+        settings.RAG_RERANK = False
+        print("（已關閉 cross-encoder rerank）")
 
     items = [json.loads(l) for l in open(GOLDEN, encoding="utf-8") if l.strip()]
     con = sqlite3.connect("file:doc_management.db?mode=ro", uri=True)

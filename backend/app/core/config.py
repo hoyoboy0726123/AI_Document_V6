@@ -149,9 +149,19 @@ class Settings(BaseSettings):
     # 撈寬再精選（rerank）：對融合後的候選池，用一次便宜 LLM 打分，把「真正含規格/判定/程序」
     # 的乾淨段落排到前面、把修訂紀錄/續頁/目錄等垃圾踢掉，再餵生成。失敗自動退回原順序。
     RAG_RERANK: bool = True
-    # 送進 rerank 的候選數。12 太小 —— 融合後有 50~90 個候選，實測 pool 加大到
-    # 24 是 recall@5 從 0.7 提升到 0.8 的關鍵之一（CE 成本 0.4s → 1.0s）。
-    RAG_RERANK_POOL: int = 24
+    # 送進 rerank 的候選數。
+    #
+    # 一度依外部審查建議加大到 24（該報告以自建 10 題集量到 7/10 → 8/10），但
+    # 本專案的 golden set（30 題）顯示加大反而是淨損失，而且更慢：
+    #     snippet 1800 / pool 12   hit@5 0.733  MRR 0.549  146s   <- 最佳
+    #     snippet 1800 / pool 24   hit@5 0.733  MRR 0.516  179s
+    #     snippet 1800 / pool 40   hit@5 0.667  MRR 0.501  244s
+    # 候選越多，reranker 要在更多雜訊裡挑，排序反而變差。
+    #
+    # 真正決定成敗的是 snippet 長度而非 pool 大小：
+    #     snippet 500  / pool 24   hit@5 0.433  MRR 0.300   <- 少 9 題
+    # reranker 先前不是弱，是被餓著（平均塊長 1465，卻只餵它 500 字元）。
+    RAG_RERANK_POOL: int = 12
     RAG_RERANK_MIN_SCORE: int = 3               # LLM 後端：低於此分（0-10）視為不相關，剔除
     # rerank 後端：cross_encoder（專門模型，CPU，~1-3s，建議）／ llm（用 gemma 打分，慢 ~100s）。
     # cross_encoder 載入失敗會自動退回 llm。
@@ -165,6 +175,20 @@ class Settings(BaseSettings):
     RAG_RERANK_SNIPPET_CHARS: int = 1800
     # auto = 有 CUDA 就用 GPU。原本寫死 cpu，rerank 是每次查詢都跑的階段，顯卡卻閒置。
     RAG_RERANK_DEVICE: str = "auto"      # auto | cpu | cuda
+    # 融合第 1 名保底置頂 —— 預設關閉，因為實測是淨損失。
+    #
+    # 它的原意是「rerank 對數字表／跨語言評分不準，可能把融合第 1 名踢出
+    # top_n，所以保底放回並置頂」。但 golden set 量測顯示它一直在扯 reranker
+    # 後腿（30 題）：
+    #     完全不 rerank            hit@5 0.633  MRR 0.472
+    #     rerank + 保底（舊預設）   hit@5 0.700  MRR 0.447
+    #     rerank，關掉保底          hit@5 0.733  MRR 0.516
+    #
+    # 開著保底時，reranker 看起來「多拉進 2 題卻把原有的往下推」，像是隨機重排；
+    # 關掉之後才看得出它真正的貢獻（比不 rerank 多 3 題，且 MRR 同步上升）。
+    # 原因是它會把 cross-encoder 判為不相關的塊硬塞到位置 0（審查實測有一例
+    # CE 分數 0.172 vs 最佳 0.998），還連帶污染 primary_page 的頁距視窗。
+    RAG_RERANK_GUARANTEE_TOP: bool = False
 
     # 低信心 fallback：以「最相關段落的 cross-encoder 分數」當信心訊號。實測相關題 top 分數
     # ≥0.4(離題 ≈0.00），故門檻設 0.15 可乾淨分開。低於此值時不硬答，改回「最接近的內容
