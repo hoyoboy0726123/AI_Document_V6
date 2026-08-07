@@ -1194,6 +1194,47 @@ def _build_enumeration_answer(db: Session, chosen: Dict[str, Any], rag_evidence,
     return body, enum_sources
 
 
+def _emit_final(db: Session, question: str, text: str,
+                sources: Optional[List[Dict[str, Any]]],
+                fallback_evidence: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """所有「產出最終答案」的出口都必須經過這裡。
+
+    run_agent 有 9 個 yield final 的地方，先前只有末端那一個做了完整處理
+    （查無資料兜底、來源正規化）。其餘 8 個提早 return，於是：
+      * 結構性出口若合成出「查無相關資料」就照樣送出，而末端出口會用低信心
+        兜底列出最接近的內容 —— 同一個問題走哪個出口決定了它有沒有兜底
+      * 早期 spec 關係出口的 sources 是 `_rag_src or []`，沒有 seeded 兜底，
+        使用者可能看到答案卻沒有任何可點的來源
+
+    這與 _grounded_synthesis 那次搬遷要解決的是同一類問題：橫切關注點散落在
+    多個出口，新增一個出口就漏一次。三份獨立審查都指出了這個結構。
+    """
+    txt = (text or "").strip()
+    src = list(sources or [])
+
+    # 查無資料兜底：手上有檢索到的段落就不要交出一句「查無相關資料」。
+    if _is_no_answer(txt) and fallback_evidence:
+        closest = [{"title": ev.get("title"), "page": ev.get("page"),
+                    "text": ev.get("snippet")} for ev in fallback_evidence[:3]]
+        try:
+            alt = ai.low_confidence_answer(question, closest)
+            if alt and alt.strip():
+                txt = alt.strip()
+                src = [{"document_id": ev.get("document_id"), "title": ev.get("title"),
+                        "page": ev.get("page"), "snippet": ev.get("snippet"),
+                        "score": ev.get("score")} for ev in fallback_evidence[:5]]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("_emit_final 兜底失敗: %s", e)
+
+    # 來源正規化：沒有來源但手上有證據時補上，讓前端至少有東西可點。
+    if not src and fallback_evidence:
+        src = [{"document_id": ev.get("document_id"), "title": ev.get("title"),
+                "page": ev.get("page"), "snippet": ev.get("snippet"),
+                "score": ev.get("score")} for ev in fallback_evidence[:5]]
+
+    return {"type": "final", "text": txt, "sources": src}
+
+
 def run_agent(
     db: Session,
     question: str,
@@ -1202,7 +1243,6 @@ def run_agent(
     max_steps: int = 8,
 ) -> Generator[Dict[str, Any], None, None]:
     """
-    _budget = _new_retry_budget()   # 本次請求共用；不可用 ContextVar，見 _new_retry_budget
     Yield events:
       {"type": "thought", "step": n, "text": ...}
       {"type": "tool_call", "step": n, "tool": str, "input": dict}
@@ -1210,6 +1250,11 @@ def run_agent(
       {"type": "final", "text": str}
       {"type": "error", "message": str}
     """
+    _budget = _new_retry_budget()   # 本次請求共用；不可用 ContextVar，見 _new_retry_budget
+    # 提前宣告：_emit_final 的兜底參數需要它，而有三個早期出口在原本的宣告
+    # 位置之前就會 yield（實測 NameError）。空 list 代表「還沒檢索過」，
+    # 兜底自然跳過。
+    seeded: List[Dict[str, Any]] = []
     # 問題沒指名對象卻在要具體數值 → 先反問，不要硬答（agent 的互動價值）。
     #
     # 放在最前面而非流程末端的原因:語料有 20 幾種測試方法，各有自己的條件，
@@ -1241,7 +1286,7 @@ def run_agent(
         else:
             yield {"type": "thought", "step": 0,
                    "text": "問題未指名測試類型，先反問以縮小範圍（避免任意挑一項測試作答）。"}
-            yield {"type": "final", "text": _clarify_scope_text(db, question), "sources": []}
+            yield _emit_final(db, question, _clarify_scope_text(db, question), [])
             return
 
     # 關係題 + 問句點名某規範 → 先給 KG 的權威關係清單，不要讓後面的路徑搶走。
@@ -1284,7 +1329,7 @@ def run_agent(
                     _body = _blk if not _rag_part else (
                         f"{_blk}\n\n── 補充（文件內容檢索）──\n{_rag_part}"
                     )
-                    yield {"type": "final", "text": _body, "sources": _rag_src or []}
+                    yield _emit_final(db, question, _body, _rag_src, seeded)
                     return
 
     # 純列舉題（「有哪些子項目 / 列出全部」且非規格/判定/目的等細節面向）→ 直接用 KG 確定性完整列舉。
@@ -1313,7 +1358,7 @@ def run_agent(
                  "references": fb.get("references") or []},
                 None, conversation_history,
             )
-            yield {"type": "final", "text": body, "sources": esrc}
+            yield _emit_final(db, question, body, esrc, seeded)
             return
 
     # 結構性問題（逐項細節 / 概覽）：用 KG 把「全部子項內容」撈齊(保證完整、含關鍵字漏撈的子項)，
@@ -1335,7 +1380,7 @@ def run_agent(
             logger.warning("structural grounded synthesis failed: %s", e)
             ans, sources = None, []
         if ans and ans.strip():
-            yield {"type": "final", "text": ans.strip(), "sources": sources or []}
+            yield _emit_final(db, question, ans, sources, seeded)
             return
         # 合成失敗 → 落回下方完整 ReAct loop
 
@@ -1354,7 +1399,6 @@ def run_agent(
     spec_candidates: List[str] = []  # 過程中查到的規範 canonical_id（最後挑「問題提到的那個」當主體）
     kg_edges_seen = 0  # Phase 3：圖譜關聯數，供完整度反問
     structural_results: List[Dict[str, Any]] = []  # list_subitems 的權威完整清單（列舉題確定性作答）
-    seeded: List[Dict[str, Any]] = []   # 保留供後段「補過仍無證據」的低信心兜底
     seed_conf: Optional[float] = None
     threshold = getattr(settings, "RAG_LOWCONF_CE_THRESHOLD", 0.15)
 
@@ -1546,7 +1590,7 @@ def run_agent(
                 {"document_id": ev.get("document_id"), "title": ev.get("title"),
                  "page": ev.get("page"), "snippet": ev.get("snippet"), "score": ev.get("score")}
                 for ev in seeded[:3]]
-            yield {"type": "final", "text": body, "sources": src}
+            yield _emit_final(db, question, body, src, seeded)
             return
 
     # 列舉題：用 list_subitems 的權威完整清單作答（不經會漏項的 RAG 合成）。
@@ -1579,7 +1623,7 @@ def run_agent(
 
     if chosen and not is_app:
         body, enum_sources = _build_enumeration_answer(db, chosen, rag_evidence, conversation_history)
-        yield {"type": "final", "text": body, "sources": enum_sources}
+        yield _emit_final(db, question, body, enum_sources, seeded)
         return
 
     # 確定性：問句若明確點名某方法號（如「509.7 引用了哪些規範」），直接用該號做 section_lookup，
@@ -1636,7 +1680,7 @@ def run_agent(
                 {"document_id": ev.get("document_id"), "title": ev.get("title"),
                  "page": ev.get("page"), "snippet": ev.get("snippet"), "score": ev.get("score")}
                 for ev in seeded[:3]]
-            yield {"type": "final", "text": body, "sources": src}
+            yield _emit_final(db, question, body, src, seeded)
             return
 
     # KG ⊇ RAG（規範類）：查過某規範(spec_lookup/spec_references/supersedes) → 用確定性「規範關係區塊」
@@ -1674,7 +1718,7 @@ def run_agent(
                 {"document_id": ev.get("document_id"), "title": ev.get("title"),
                  "page": ev.get("page"), "snippet": ev.get("snippet"), "score": ev.get("score")}
                 for ev in seeded[:3]]
-            yield {"type": "final", "text": body, "sources": src}
+            yield _emit_final(db, question, body, src, seeded)
             return
 
     # Phase 0/3：合成 → 充足性檢查 → 不足則自動補充一輪 → 重新合成 → 仍不足才低信心兜底。
@@ -1754,7 +1798,34 @@ def run_agent(
     # 呼叫 4 個地方 —— 最壞情況是 16 次 LLM 生成加 12 輪檢索。
     # 實測單一請求卡住 6 分鐘、一分鐘內寫出 1031 行日誌，使用者端表現為系統無回應。
 
-    if synth and synth.strip():
+    # 檢索信心過低 → 不要硬答，即使合成得出東西。
+    #
+    # 這道判斷原本只在 run_rag_only（混合模式的 RAG 分支）有，Agent 模式沒有 ——
+    # 同一個離題問題，混合模式誠實說查不到，Agent 模式卻編出數值：
+    #     「這批文件裡量子電腦的低溫維持條件」CE 信心 0.094（門檻 0.15）
+    #     → 「低溫維持條件為將溫度降至 -10 °C…」
+    #
+    # 下面那個 elif 只在「完全沒有證據」時兜底，但離題問題總是撈得到
+    # 「最接近但不相關」的段落，所以永遠不會觸發。
+    #
+    # 這是今天第三次遇到同型問題：同一個防護只補了一條路徑。
+    #
+    # 條件刻意「不」包含 not kg_notes。第一版照抄了下方 weak 判斷的組合，結果
+    # 這道閘門永遠不觸發 —— Agent 模式會主動呼叫 KG 工具，kg_notes 幾乎總是非空。
+    # 兩者的目的不同：
+    #   weak      判斷「要不要再補一輪檢索」→ 有 KG 線索可挖就不算 weak，合理
+    #   _too_weak 判斷「該不該誠實說查不到」→ kg_notes 只代表 agent 查過規範關係，
+    #             不代表答案有依據，拿它當「有把握」的證據是錯的
+    _too_weak = (seed_conf is not None and seed_conf < threshold)
+    if _too_weak and seeded:
+        logger.info("run_agent 低信心兜底：CE=%.3f < %.2f", seed_conf, threshold)
+        closest = [{"title": ev.get("title"), "page": ev.get("page"),
+                    "text": ev.get("snippet")} for ev in seeded[:3]]
+        final_text = ai.low_confidence_answer(question, closest)
+        final_sources = [{"document_id": ev.get("document_id"), "title": ev.get("title"),
+                          "page": ev.get("page"), "snippet": ev.get("snippet"),
+                          "score": ev.get("score")} for ev in seeded[:5]]
+    elif synth and synth.strip():
         final_text = synth
         final_sources = syn_sources
     elif not (rag_evidence or kg_notes):
@@ -1795,4 +1866,4 @@ def run_agent(
             except Exception as e:  # noqa: BLE001
                 logger.warning("final give-up rescue failed: %s", e)
 
-    yield {"type": "final", "text": final_text, "sources": final_sources}
+    yield _emit_final(db, question, final_text, final_sources, rag_evidence or seeded)
