@@ -88,7 +88,9 @@ def main() -> None:
     for it in val_items:
         gids = gold_chunk_ids(con, it["gold"])
         embed_q, doc_id = retrieval.resolve_spec_scope(db, it["q"])
-        emb = ai.embed_texts([embed_q])
+        # 必須與 rag.py 走同一條查詢路徑（含 instruct 前綴），
+        # 否則量到的不是實際行為。
+        emb = ai.embed_query(embed_q)
         if not emb:
             continue
 

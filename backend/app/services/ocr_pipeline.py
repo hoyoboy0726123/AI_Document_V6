@@ -27,15 +27,24 @@ from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
-try:
-    from paddleocr import PaddleOCR  # type: ignore
-except Exception:  # pragma: no cover
-    PaddleOCR = None
-
-try:
-    from paddleocr import PPStructureV3  # type: ignore
-except Exception:  # pragma: no cover
-    PPStructureV3 = None
+# paddleocr 改為「用到才載入」。
+#
+# 原本是模組層級 import，於是不管 OCR_ENGINE 設成什麼都會載入 —— 而預設是
+# rapid（onnx 三件套），paddle 只是保底用的備援。代價是每次後端啟動、每支碰到
+# 文件服務的腳本，都要跑 paddlex 對 huggingface / aistudio / modelscope /
+# bcebos 的四次連線檢查，拖慢啟動又多佔記憶體。
+#
+# 而且它會往 stderr 寫「Checking connectivity to the model hosters…」，
+# PowerShell 5.1 把原生指令的 stderr 包成 NativeCommandError，害整條管線中止
+# —— 重抽腳本「第一份完成後下一份立刻 exit=1 且零輸出」就是這樣來的。
+def _load_paddle(name: str):
+    """延遲載入 paddleocr 的類別；未安裝或載入失敗回 None。"""
+    try:
+        import paddleocr  # type: ignore
+        return getattr(paddleocr, name, None)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("載入 paddleocr.%s 失敗（僅影響 pp_structure 引擎）：%s", name, exc)
+        return None
 
 
 @dataclass
@@ -158,7 +167,8 @@ def _html_table_to_markdown(html: str) -> str:
     return "\n".join(md_lines)
 
 
-def _build_paddle_ocr() -> "PaddleOCR":
+def _build_paddle_ocr():
+    PaddleOCR = _load_paddle("PaddleOCR")
     if PaddleOCR is None:
         raise RuntimeError("PaddleOCR 未安裝，請先在 backend 環境安裝 paddleocr")
 
@@ -177,7 +187,8 @@ def _build_paddle_ocr() -> "PaddleOCR":
     )
 
 
-def _build_pp_structure() -> "PPStructureV3":
+def _build_pp_structure():
+    PPStructureV3 = _load_paddle("PPStructureV3")
     if PPStructureV3 is None:
         raise RuntimeError("PPStructureV3 未安裝，請先 pip install 'paddlex[ocr]'")
 
@@ -516,7 +527,8 @@ def extract_image_pdf_blocks(
         except Exception as exc:
             logger.warning("rapid OCR 失敗，改用 PP-StructureV3：%s", exc)
 
-    if PPStructureV3 is not None:
+    # 只有真的要退回 paddle 時才載入它（預設引擎是 rapid，多數情況根本不會走到這）
+    if _load_paddle("PPStructureV3") is not None:
         try:
             if getattr(settings, "OCR_SUBPROCESS_ISOLATION", True):
                 return extract_image_pdf_blocks_isolated(pdf_path)

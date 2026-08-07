@@ -17,7 +17,7 @@ import contextvars
 import json
 import logging
 import re
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -166,7 +166,7 @@ _NO_ANSWER_RE = re.compile(
 # 問題是否指名了查詢對象。缺少對象時（例如只說「找出測試條件」），
 # 語料裡 20 幾種測試方法各有自己的條件，任何答案都是任意挑的 —— 應該反問而非放棄。
 _SUBJECT_RE = re.compile(
-    r"MIL-STD|MIL-DTL|MIL-PRF|MIL-HDBK|ISO|IEC|IEEE|ASTM|Method\s*\d|方法\s*\d|\d{3}\.\d"
+    r"MIL-STD|MIL-DTL|MIL-PRF|MIL-HDBK|ISO|IEC|IEEE|ASTM|Method\s*\d{3}(?:\.\d+)?|方法\s*\d{3}(?:\.\d+)?|\d{3}\.\d"
     r"|高溫|低溫|溫度衝擊|濕度|鹽霧|砂塵|沙塵|振動|震動|衝擊|加速度|太陽|輻射|黴菌|真菌"
     r"|淋雨|降雨|低壓|高度|爆炸|酸性|結冰|凍雨|運輸|噪音|彈跳|落下|傾斜",
     re.I,
@@ -278,15 +278,20 @@ _PURPOSE_RE = re.compile(
 
 def _wants_values(question: str) -> bool:
     q = question or ""
-    # 明確索取數值的線索優先於任何否決：「溫度範圍是多少」含「範圍」，
+    # 關係題與列舉題的否決必須排在最前面。
+    #
+    # 原本先比對「條件|參數|規格」才輪到否決，於是
+    #     「MIL-STD-810H 引用了哪些標準的規格」→ True
+    #     「哪些方法引用了 ASTM D3951 的參數」→ True
+    # 這兩題會啟動 _drop_off_topic 的證據收斂，而 in_scope 對「不在錨點文件內」
+    # 的證據一律擋掉 —— 跨規範關係題的證據會被整批清空，正好毀掉它們需要的東西。
+    if _RELATION_RE.search(q) or _ENUM_STRUCT_RE.search(q):
+        return False
+    # 明確索取數值的線索優先於其餘否決：「溫度範圍是多少」含「範圍」，
     # 但它問的是數值區間，不是文件的 scope。
     if _WANTS_VALUE_RE.search(q):
         return True
     if _PURPOSE_RE.search(q) or re.search(r"(?<![溫濕濃頻壓時速電])範圍", q):
-        return False
-    # 關係題（「哪些方法引用了 X」）與列舉題（「有哪些測試方法」）都含「方法」二字，
-    # 但它們走 KG 確定性路徑，答案是清單而非數值 —— 補救迴圈與反問對它們都沒有意義。
-    if _RELATION_RE.search(q) or _ENUM_STRUCT_RE.search(q):
         return False
     return bool(_HOWTO_RE.search(q))
 
@@ -1018,7 +1023,7 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
     """
     from . import rerank, retrieval
 
-    embeddings = ai.embed_texts([question])
+    embeddings = ai.embed_query(question)
     if not embeddings:
         return [], None
     filtered = retrieval.hybrid_retrieve(db, question, embeddings[0], top_k)

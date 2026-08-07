@@ -480,6 +480,43 @@ def generate_rag_answer_stream(
 _EMBED_MAX_CHARS = 7000  # qwen3-embedding:8b supports 8192 tokens (~7000 English chars)
 _EMBED_BATCH_SIZE = 10   # process N chunks per request to avoid timeout
 
+# Qwen3-Embedding 是非對稱模型：查詢端要加 instruct 前綴、文件端不加。
+# 原本查詢與文件共用同一條路徑（embed_texts），完全沒有非對稱處理。
+# 官方說明不加約掉 1-5% 檢索表現，跨語言（中文問英文語料）情境收益偏高端，
+# 因為 instruct 能明示「跨語言檢索」這個意圖。
+#
+# 只動查詢端 → 文件向量不變 → **不需要重建 FAISS 索引**，改壞了改回來即可。
+# 前綴刻意保持短。實測（golden set 30 題，評測為確定性、同設定兩次結果相同）：
+#
+#   無前綴                      recall@20 0.867  hit@5 0.700  MRR 0.506
+#   長前綴（130 字元，官方風格） recall@20 0.867  hit@5 0.667  MRR 0.462   ← 淨賠
+#   短前綴（64 字元，現行）      recall@20 0.900  hit@5 0.700  MRR 0.447
+#
+# 官方文件說「不加掉 1-5%」，但在本語料上長前綴反而讓排序變差 —— 查詢只有
+# 10-20 字元，130 字元的前綴會稀釋查詢本身。
+#
+# 短前綴的判讀要誠實：多 1 題進候選池，但 hit@5 完全沒動，也就是那 1 題沒有
+# 轉化成使用者看得到的改善；MRR 下降則沒有實際後果，因為前 5 名全部都會進
+# LLM 脈絡（RAG_MAX_CONTEXT_CHUNKS=6），排名先後不影響模型看到什麼。
+# 結論是「功能中性」。保留的理由是召回為唯一無法事後補救的階段，多留餘裕；
+# 等 reranker 升級（bge-reranker-v2-m3）之後，那 1 題才可能轉化。
+# 要回退設 EMBEDDING_QUERY_INSTRUCT=False 即可，不需重建索引。
+_QUERY_INSTRUCT = "Instruct: Retrieve relevant technical standard passages.\nQuery: "
+
+
+def embed_query(text: str) -> List[List[float]]:
+    """查詢用的嵌入（加 instruct 前綴）。
+
+    與 embed_texts 分開，是為了讓「查詢」與「文件」兩端的差異顯性化 ——
+    共用同一個函式時，非對稱處理沒有地方可放，也沒有人會發現它缺了。
+    """
+    if not (text or "").strip():
+        return []
+    if not getattr(settings, "EMBEDDING_QUERY_INSTRUCT", True):
+        return embed_texts([text])
+    return embed_texts([_QUERY_INSTRUCT + text])
+
+
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """經 embedding provider 抽象產生向量，受 EMBEDDING_PROVIDER 設定支配。
 

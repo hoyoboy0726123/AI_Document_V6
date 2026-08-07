@@ -142,8 +142,8 @@ def query_rag(
 
     # 規範編號從「嵌入用字串」移到「文件過濾條件」：它在目錄／頁首／參考文獻
     # 出現上千次，留在查詢裡會主導向量、把答案段落擠出候選池。
-    embed_query, spec_doc_id = retrieval.resolve_spec_scope(db, search_query)
-    embeddings = ai.embed_texts([embed_query])
+    vector_query, spec_doc_id = retrieval.resolve_spec_scope(db, search_query)
+    embeddings = ai.embed_query(vector_query)
     if not embeddings:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="嵌入計算失敗")
 
@@ -152,7 +152,7 @@ def query_rag(
         document_id=spec_doc_id,
     )
     filtered = _augment_for_values(
-        db, payload, lambda q: (ai.embed_texts([q]) or [None])[0],
+        db, payload, lambda q: (ai.embed_query(q) or [None])[0],
         vector_config, payload.top_k, question, filtered,
     )
     if not filtered:
@@ -271,8 +271,8 @@ def query_stream(
     if (has_cn and not has_cn_opt) or (not has_cn and has_cn_opt):
         search_query = question
 
-    embed_query, spec_doc_id = retrieval.resolve_spec_scope(db, search_query)
-    embeddings = ai.embed_texts([embed_query])
+    vector_query, spec_doc_id = retrieval.resolve_spec_scope(db, search_query)
+    embeddings = ai.embed_query(vector_query)
     if not embeddings:
         def _embed_error():
             yield f"data: {json.dumps({'type': 'error', 'message': '嵌入計算失敗'}, ensure_ascii=False)}\n\n"
@@ -285,7 +285,7 @@ def query_stream(
         document_id=spec_doc_id,
     )
     filtered = _augment_for_values(
-        db, payload, lambda q: (ai.embed_texts([q]) or [None])[0],
+        db, payload, lambda q: (ai.embed_query(q) or [None])[0],
         vector_config, top_k, question, filtered,
     )
 

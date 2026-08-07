@@ -65,12 +65,59 @@ def _format_table_markdown(table_data: List[List]) -> str:
     return "\n".join(rows)
 
 
-def _table_header_summary(table_data: List[List]) -> str:
-    """空白表格只取第一行非空標題。"""
+def _sparse_table_text(table_data: List[List]) -> str:
+    """空白率高的表格：保留「所有非空儲存格」，而不是只留第一列。
+
+    原本只取第一列當標題摘要，其餘整片丟棄。問題是 pdfplumber 的 find_tables()
+    常把工程圖表（曲線圖、包絡線圖）誤判成表格，而圖上的標註正是規範的限值本體：
+
+        MIL-STD-704F p27  丟掉「152.0 V; 0.0083 sec / 130.0 V; 0.0167 sec / …」
+                          → 該頁在資料庫裡是 0 個區塊，電壓包絡線整段不存在
+        MIL-STD-882E p97  丟掉整張 Probability Levels 風險對照表（1055 字元，
+                          連佔位符都沒寫，DB 裡查不到任何痕跡）
+        MIL-STD-810H p99  781 字元只留下 65 字元
+
+    抽樣 47 個被判定為 mostly-empty 的表格，被丟棄的字元佔 76.5% —— 空白率高
+    不代表沒內容。改為逐列輸出非空儲存格，空列直接略過。
+    """
     if not table_data:
         return ""
-    header_cells = [_cell_text(c) for c in table_data[0] if _cell_text(c)]
-    return " | ".join(header_cells)
+    lines: List[str] = []
+    for row in table_data:
+        cells = [_cell_text(c) for c in row if _cell_text(c)]
+        if cells:
+            lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+# 每頁都會出現、對語意毫無貢獻的固定樣板。
+# 只列「整行就是它」的樣式，避免誤刪內文中提到的規範編號。
+_BOILERPLATE_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"Downloaded\s+from\s+https?://\S*everyspec\S*"
+    r"|\(This page is intentionally blank\.?\)"
+    r"|MIL-(?:STD|HDBK|DTL|PRF)-[\dA-Z\-]+"        # 單獨成行的頁首文件編號
+    r")\s*$",
+    re.I | re.M,
+)
+
+
+def _strip_boilerplate(text: str) -> str:
+    """移除浮水印與頁首頁尾樣板。
+
+    everyspec 浮水印在語料裡出現 2887 次（118,367 字元），而且 **89% 落在區塊
+    中段** —— 也就是它會攔腰打斷句子，而不只是黏在頭尾。單獨成行的文件編號
+    （「MIL-STD-810H」）另有 3476 次。這些字串在每一塊都一樣，對向量沒有鑑別力，
+    只是稀釋語意並吃掉分塊額度。
+
+    刻意只比對「整行就是樣板」：內文提到「…依 MIL-STD-810H 的規定…」時，
+    編號是有意義的內容，不能刪。
+    """
+    if not text:
+        return text
+    cleaned = _BOILERPLATE_LINE_RE.sub("", text)
+    # 連續空行收斂成一行，避免刪除後留下大片空白
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _extract_rotated_text(page) -> str:
@@ -163,9 +210,13 @@ def _extract_page_content(page) -> str:
         table_bboxes.append(tobj.bbox)
 
         if _is_mostly_empty(data):
-            summary = _table_header_summary(data)
-            if summary:
-                table_parts.append((y_top, f"[空白記錄表: {summary}]"))
+            # 空白率高 ≠ 沒內容。保留所有非空儲存格（見 _sparse_table_text）。
+            # 佔位符也改成英文：原本寫「[空白記錄表: ...]」，那是整批英文語料裡
+            # 唯一的中文，而使用者用中文提問 —— 148 處佔位符會變成 CJK 查詢的
+            # 虛假磁石（實測英文文件裡的 CJK 字元有 740 個來自這個佔位符）。
+            sparse = _sparse_table_text(data)
+            if sparse:
+                table_parts.append((y_top, sparse))
         else:
             table_parts.append((y_top, _format_table_markdown(data)))
 
@@ -220,7 +271,7 @@ def _extract_page_content(page) -> str:
     body = "\n".join(text for _, text in all_parts).strip()
     if rotated_text:
         body = (body + "\n" + rotated_text).strip() if body else rotated_text
-    return body
+    return _strip_boilerplate(body)
 
 
 def extract_text_and_segments(pdf_bytes: bytes) -> Tuple[str, List[schemas.DocumentSegment]]:

@@ -43,7 +43,7 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     top_k = int(params.get("top_k") or 5)
     top_k = max(1, min(top_k, 10))
 
-    embeddings = ai.embed_texts([query])
+    embeddings = ai.embed_query(query)
     if not embeddings:
         return {"error": "embedding failed"}
 

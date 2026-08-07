@@ -1,9 +1,9 @@
 {
   "n_value_questions": 30,
-  "recall@20": 0.9,
+  "recall@20": 0.867,
   "hit@5": 0.7,
-  "mrr": 0.447,
-  "retrieval_seconds": 182.5,
+  "mrr": 0.506,
+  "retrieval_seconds": 209.4,
   "per_question": [
     {
       "id": "v01",
@@ -23,7 +23,7 @@
       "id": "v03",
       "q": "黴菌測試量測濕球溫度時，通過濕球的風速至少要多少",
       "recall": true,
-      "rank": 5,
+      "rank": 1,
       "n_gold_chunks": 1
     },
     {
@@ -36,8 +36,8 @@
     {
       "id": "v05",
       "q": "標準大氣條件下的溫度與相對濕度是多少",
-      "recall": true,
-      "rank": 5,
+      "recall": false,
+      "rank": 0,
       "n_gold_chunks": 1
     },
     {
@@ -72,7 +72,7 @@
       "id": "v10",
       "q": "MIL-STD-810H 沙塵測試的塵土濃度是多少",
       "recall": true,
-      "rank": 3,
+      "rank": 2,
       "n_gold_chunks": 4
     },
     {
@@ -107,7 +107,7 @@
       "id": "v15",
       "q": "引信測試的溫度量測公差是多少",
       "recall": true,
-      "rank": 0,
+      "rank": 1,
       "n_gold_chunks": 1
     },
     {
@@ -149,7 +149,7 @@
       "id": "v21",
       "q": "油耗測試的水套出口溫度要維持在幾度",
       "recall": true,
-      "rank": 1,
+      "rank": 2,
       "n_gold_chunks": 1
     },
     {
@@ -163,7 +163,7 @@
       "id": "v23",
       "q": "潤滑劑的磨損防止特性平均磨痕直徑上限是多少",
       "recall": true,
-      "rank": 2,
+      "rank": 1,
       "n_gold_chunks": 4
     },
     {

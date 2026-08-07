@@ -159,6 +159,9 @@ class Settings(BaseSettings):
     RAG_RERANK_MODEL: str = "BAAI/bge-reranker-base"  # 多語(含中英)cross-encoder，CPU 可跑
     # rerank 送進 cross-encoder 的每塊字元數。原本寫死 500，而語料平均塊長 1465
     # —— reranker 對每塊後 2/3 沒看到就打分，規範的數值常在後半。與切塊 max_chars 對齊。
+    # Qwen3-Embedding 是非對稱模型：查詢端加 instruct 前綴、文件端不加。
+    # 只影響查詢，不需重建索引；設 False 可立即回到舊行為做 A/B。
+    EMBEDDING_QUERY_INSTRUCT: bool = True
     RAG_RERANK_SNIPPET_CHARS: int = 1800
     # auto = 有 CUDA 就用 GPU。原本寫死 cpu，rerank 是每次查詢都跑的階段，顯卡卻閒置。
     RAG_RERANK_DEVICE: str = "auto"      # auto | cpu | cuda

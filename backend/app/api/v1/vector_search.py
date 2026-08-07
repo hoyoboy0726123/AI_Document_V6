@@ -25,7 +25,7 @@ def test_vector_search(
 
     t0 = time.time()
 
-    embeddings = ai.embed_texts([query])
+    embeddings = ai.embed_query(query)
     if not embeddings:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="向量化失敗")
 
