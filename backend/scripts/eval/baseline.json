@@ -1,12 +1,12 @@
 {
   "n_value_questions": 30,
   "recall@20": 0.9,
-  "hit@5": 0.733,
-  "mrr": 0.549,
-  "retrieval_seconds": 177.9,
-  "value_grounding_rate": 0.6,
+  "hit@5": 0.767,
+  "mrr": 0.561,
+  "retrieval_seconds": 192.6,
+  "value_grounding_rate": 0.567,
   "hallucination_rate": 0.0,
-  "generation_seconds": 504.8,
+  "generation_seconds": 485.4,
   "per_question": [
     {
       "id": "v01",
@@ -40,7 +40,7 @@
       "id": "v05",
       "q": "標準大氣條件下的溫度與相對濕度是多少",
       "recall": true,
-      "rank": 0,
+      "rank": 3,
       "n_gold_chunks": 1
     },
     {
@@ -88,14 +88,14 @@
     {
       "id": "v12",
       "q": "引信衝擊測試的落錘高度是多少",
-      "recall": true,
+      "recall": false,
       "rank": 0,
       "n_gold_chunks": 2
     },
     {
       "id": "v13",
       "q": "引信測試的等效試驗負載重量是多少",
-      "recall": false,
+      "recall": true,
       "rank": 0,
       "n_gold_chunks": 2
     },
@@ -167,7 +167,7 @@
       "q": "潤滑劑的磨損防止特性平均磨痕直徑上限是多少",
       "recall": true,
       "rank": 1,
-      "n_gold_chunks": 4
+      "n_gold_chunks": 5
     },
     {
       "id": "v24",
