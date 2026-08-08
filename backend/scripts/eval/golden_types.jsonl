@@ -1,0 +1,24 @@
+{"id": "e01", "kind": "enum", "q": "MIL-STD-810H 的 METHOD 514.8 底下有哪些 ANNEX", "gold": ["A", "B", "C", "D", "E", "F"], "note": "KG part_of 權威清單，6 個"}
+{"id": "e02", "kind": "enum", "q": "METHOD 504.3 包含哪幾個附錄", "gold": ["A", "B", "C"], "note": "KG part_of，3 個"}
+{"id": "e03", "kind": "enum", "q": "METHOD 519.8 有哪些 ANNEX", "gold": ["A", "B", "C"], "note": "KG part_of，3 個"}
+{"id": "e04", "kind": "enum", "q": "黴菌測試方法底下有幾個附錄，分別是什麼", "gold": ["A", "B"], "note": "METHOD 508.8，不指名編號的列舉題"}
+{"id": "r01", "kind": "rel_ref", "q": "MIL-STD-882E 引用了哪些其他規範", "gold": ["MIL-STD-1472", "ISO 2631", "MIL-STD-464", "MIL-HDBK-1908", "ISO 5349"], "note": "KG references，已去除自我引用", "route": "agent"}
+{"id": "r02", "kind": "rel_ref", "q": "MIL-STD-704F 參考了哪些規範", "gold": ["ISO 1540", "MIL-HDBK-704", "MIL-STD-464"], "note": "KG references", "route": "agent"}
+{"id": "r03", "kind": "rel_ref", "q": "MIL-PRF-85570D 引用了哪些規範", "gold": ["MIL-PRF-83282", "MIL-PRF-23377", "MIL-PRF-85285"], "note": "KG references", "route": "agent"}
+{"id": "s01", "kind": "rel_sup", "q": "哪一份規範取代了 MIL-STD-210C", "gold": ["MIL-HDBK-310"], "note": "KG supersedes", "route": "agent"}
+{"id": "s02", "kind": "rel_sup", "q": "MIL-PRF-680C 取代了哪一版", "gold": ["MIL-PRF-680B"], "note": "KG supersedes", "route": "agent"}
+{"id": "s03", "kind": "rel_sup", "q": "MIL-STD-1399B 取代了什麼", "gold": ["MIL-STD-1399A"], "note": "KG supersedes", "route": "agent"}
+{"id": "p01", "kind": "purpose", "q": "黴菌測試的目的是什麼", "gold": ["susceptibility", "fungal growth", "黴菌"], "min_hit": 1, "note": "METHOD 508.8 1.1 Purpose，中英擇一即可"}
+{"id": "p02", "kind": "purpose", "q": "鹽霧測試是為了確認什麼", "gold": ["protective coating", "finish", "保護塗層", "鍍層", "防蝕"], "min_hit": 1, "note": "METHOD 509.7 1.1"}
+{"id": "p03", "kind": "purpose", "q": "淋雨測試想驗證的是什麼", "gold": ["penetration of water", "protective cover", "防水", "滲入", "密封"], "min_hit": 1, "note": "METHOD 506.6 1.1"}
+{"id": "p04", "kind": "purpose", "q": "MIL-STD-810H 這份規範的適用範圍是什麼", "gold": ["environmental", "環境", "tailoring", "剪裁", "life cycle", "壽命週期"], "min_hit": 2, "note": "Part One scope"}
+{"id": "x01", "kind": "cross_method", "q": "淋雨測試的鹽溶液濃度規定是多少", "gold": [], "note": "METHOD 506.6 全文 0 次出現 salt —— 正確行為是說淋雨測試沒有這項規定，不得引用 509.7 鹽霧的濃度", "forbidden": ["鹽溶液", "salt solution", "比重", "specific gravity"]}
+{"id": "x02", "kind": "cross_method", "q": "黴菌測試的鹽霧沉降率是多少", "gold": [], "note": "METHOD 508.8 全文 0 次出現 fallout —— 不得引用 509.7 的沉降率", "forbidden": ["沉降", "fallout", "ml/cm"]}
+{"id": "x03", "kind": "cross_method", "q": "沙塵測試要求的黴菌培養菌種有哪些", "gold": [], "note": "沙塵測試沒有菌種規定 —— 這正是先前實測發生過的污染方向", "forbidden": ["菌種", "fungal species", "Aspergillus", "黴菌"]}
+{"id": "f01", "kind": "false_premise", "q": "MIL-STD-810H 的 METHOD 599 電磁脈衝測試條件是什麼", "gold": [], "note": "810H 沒有 METHOD 599，也沒有電磁脈衝方法（那是 MIL-STD-461G 的範疇）", "forbidden": ["METHOD 599", "電磁脈衝"]}
+{"id": "f02", "kind": "false_premise", "q": "MIL-STD-810H 第 12 版對無人機的專章規定了什麼", "gold": [], "note": "沒有第 12 版，也沒有無人機專章", "forbidden": ["第 12 版", "無人機"]}
+{"id": "f03", "kind": "false_premise", "q": "鹽霧測試規定的最長連續曝露時間是 30 天，這個數字的依據是什麼", "gold": [], "note": "前提數字是編的 —— 正確行為是指出規範沒有這個規定，而不是為假前提找理由", "forbidden": ["30 天", "30 days"]}
+{"id": "c01", "kind": "crossdoc", "q": "MIL-STD-810H 的溫度量測公差與 MIL-STD-331D 的溫度量測公差各是多少", "gold": ["810H", "331D"], "gold_any": ["公差", "tolerance"], "note": "必須同時提到兩份文件"}
+{"id": "c02", "kind": "crossdoc", "q": "比較 MIL-PRF-2104L 與 MIL-PRF-7808L 這兩份潤滑油規範的差異", "gold": ["2104L", "7808L"], "gold_any": ["潤滑", "lubricat", "oil"], "note": "必須同時涵蓋兩份"}
+{"id": "u01", "kind": "followup", "q": "鹽霧測試的箱體溫度要維持在幾度", "followup": "那濕度呢", "gold": ["95"], "gold_followup_subject": ["鹽霧", "salt", "509"], "note": "追問省略主體，必須繼承『鹽霧測試』而不是跳到別的方法"}
+{"id": "u02", "kind": "followup", "q": "黴菌測試量測濕球溫度時，通過濕球的風速至少要多少", "followup": "這個測試要跑多久", "gold": ["4.6"], "gold_followup_subject": ["黴菌", "fungus", "508"], "note": "追問必須仍在 508.8 的範圍內"}

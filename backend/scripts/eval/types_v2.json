@@ -1,0 +1,11 @@
+{
+  "enum": 0.833,
+  "rel_ref": 0.889,
+  "rel_sup": 1.0,
+  "purpose": 0.75,
+  "cross_method": 0.333,
+  "false_premise": 0.667,
+  "crossdoc": 0.5,
+  "followup": 0.5,
+  "seconds": 587.6
+}
