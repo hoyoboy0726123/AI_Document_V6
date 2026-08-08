@@ -901,6 +901,35 @@ def _flag_unsourced_values(answer: Optional[str], contexts: List[Dict[str, Any]]
             + "、".join(unsourced[:8]))
 
 
+_ABBREV_RE = re.compile(r"\b([A-Z]{2,5})\b")
+_ABBREV_Q_MAX_LEN = 16
+
+
+def literal_abbrev_hit(question: str, evidence: List[Dict[str, Any]]) -> Optional[str]:
+    """短問句裡的縮寫是否原字出現在最相關的段落裡。
+
+    cross-encoder 給不了縮寫查詢合理的分數：實測同一份教育訓練文件裡
+        「PR 階段是什麼」 CE 0.091   「PR 是什麼意思」 CE 0.013
+        「試產階段 PR 的定義」 CE 0.862
+    三次的正解都在候選池裡（第 13 頁那張專有名詞表），但前兩種問法會被
+    低信心閘門（門檻 0.15）擋掉，使用者看到「查無高度相關內容」。
+    而「PR是什麼」「BOM」「EC」正是實務上最常見的問法。
+
+    縮寫原字出現在段落裡是很強的確定性訊號，比 CE 的語意分數可靠 ——
+    此時不該讓 CE 的低分否決它。限定「短問句 + 純英文大寫 2–5 字」
+    是為了不影響正常的長問句（語料內不存在的題目仍由 CE 閘門把關）。
+    """
+    q = (question or "").strip()
+    if len(q) > _ABBREV_Q_MAX_LEN:
+        return None
+    for m in _ABBREV_RE.finditer(q):
+        tok = m.group(1)
+        for e in evidence[:3]:
+            if re.search(r"\b" + tok + r"\b", e.get("snippet") or e.get("text") or ""):
+                return tok
+    return None
+
+
 def _flag_unverified_premise(question: str, answer: Optional[str],
                              contexts: List[Dict[str, Any]]) -> Optional[str]:
     """問句自己帶了數值、但檢索不到依據時，先標明前提未經證實。
@@ -1229,7 +1258,10 @@ def run_rag_only(db: Session, question: str,
     # 直接用即可（CE 不可用時為 None，照常作答，與 /query 端點一致）。
     if seeded:
         _thr = getattr(settings, "RAG_LOWCONF_CE_THRESHOLD", 0.15)
-        if _conf is not None and _conf < _thr:
+        _abbrev = literal_abbrev_hit(question, seeded)
+        if _abbrev:
+            logger.info("縮寫「%s」原字命中段落，略過低信心閘門（CE=%s）", _abbrev, _conf)
+        if _abbrev is None and _conf is not None and _conf < _thr:
             closest = [{"title": ev.get("title"), "page": ev.get("page"),
                         "text": ev.get("snippet")} for ev in seeded[:3]]
             low_src = [{"document_id": ev.get("document_id"), "title": ev.get("title"),
