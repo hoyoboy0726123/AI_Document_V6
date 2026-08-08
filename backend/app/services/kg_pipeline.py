@@ -169,6 +169,15 @@ def extract_kg_from_document(db: Session, document: models.Document, task: Optio
                                                     rel_type="contains", document_id=document.id, confidence=1.0)
             if rel_ok:
                 structural_edges += 1
+        # 標題節點寫好後立刻把章節標籤貼回 chunk。放在這裡而不是入庫流程更前面，
+        # 是因為標籤要有 page 才能對位，而 page 只有在標題抽取完成後才知道。
+        # 失敗不能影響 KG 建立本身 —— 章節標籤缺了只是退回頁碼判斷，不是致命問題。
+        try:
+            from . import section_path as _sp
+            _sp.assign_section_paths(db, document.id, commit=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("section_path 貼標籤失敗 %s: %s", document.id, exc)
+
         for key, specs in section_specs.items():
             sent = section_ent.get(key)
             if not sent:

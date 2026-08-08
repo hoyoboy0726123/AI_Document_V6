@@ -17,7 +17,7 @@ import contextvars
 import json
 import logging
 import re
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -370,6 +370,30 @@ def value_seed_terms(evidence: List[Dict[str, Any]], answer: str = "") -> List[s
 _SCOPE_PAGE_MARGIN = 15
 
 
+def evidence_sections(evidence: List[Dict[str, Any]]) -> Dict[str, Set[str]]:
+    """既有證據落在哪些章節（例如 {doc: {"METHOD 510.7"}}）。
+
+    比 evidence_scope 的「±15 頁」精確：頁碼是位置的近似，章節才是「同一個測試方法」
+    的真正邊界。一個方法可能跨 30 頁，兩個方法也可能擠在同一頁。
+    只有 MIL-STD-810H 有章節標籤，其餘文件回傳空集合 → 自動退回頁碼判斷。
+    """
+    out: Dict[str, Set[str]] = {}
+    for e in evidence:
+        did, sp = e.get("document_id"), e.get("section_path")
+        if did and sp:
+            out.setdefault(did, set()).add(sp)
+    return out
+
+
+def _same_method(a: str, b: str) -> bool:
+    """"METHOD 504.3" 與 "METHOD 504.3, ANNEX A" 視為同一個方法。
+
+    ANNEX 是方法本體的附錄（504.3 的 ANNEX A 就是它的燃料清單），
+    查方法本體時撈到自己的附錄是對的，撈到別的方法才是污染。
+    """
+    return a.split(",")[0].strip() == b.split(",")[0].strip()
+
+
 def evidence_scope(pages_by_doc: List[Tuple[Optional[str], Optional[int]]]) -> Dict[str, Tuple[int, int]]:
     """由既有證據算出「同一主題的合理頁碼範圍」，供補查結果過濾。
 
@@ -389,12 +413,22 @@ def evidence_scope(pages_by_doc: List[Tuple[Optional[str], Optional[int]]]) -> D
     return {d: (lo - _SCOPE_PAGE_MARGIN, hi + _SCOPE_PAGE_MARGIN) for d, (lo, hi) in scope.items()}
 
 
-def in_scope(scope: Dict[str, Tuple[int, int]], doc_id: Optional[str], page: Optional[int]) -> bool:
-    """補查到的段落是否落在合理範圍內。範圍未知（無頁碼）時保守放行。"""
+def in_scope(scope: Dict[str, Tuple[int, int]], doc_id: Optional[str], page: Optional[int],
+             sections: Optional[Dict[str, Set[str]]] = None,
+             section_path: Optional[str] = None) -> bool:
+    """補查到的段落是否落在合理範圍內。範圍未知（無頁碼）時保守放行。
+
+    有章節標籤時以章節為準，頁碼只是後備：兩者可能不一致（METHOD 509.7 跨了
+    20 頁，±15 頁會切掉它自己的後半段，卻放進隔壁 METHOD 510.7 的開頭）。
+    章節資訊只有 810H 有，其餘文件仍走原本的頁碼判斷。
+    """
     if not scope:
         return True
     if not doc_id or doc_id not in scope:
         return False          # 原本沒命中的文件 → 極可能是別的主題
+    known = (sections or {}).get(doc_id)
+    if known and section_path:
+        return any(_same_method(section_path, k) for k in known)
     if page is None:
         return True
     lo, hi = scope[doc_id]
@@ -531,7 +565,10 @@ def _drop_off_topic(question: str, evidence: List[Dict[str, Any]]) -> List[Dict[
     lo, hi = next(iter(scope.values()))
     if (hi - lo) - 2 * _SCOPE_PAGE_MARGIN > _ANCHOR_MAX_SPREAD:
         return evidence
-    kept = [e for e in evidence if in_scope(scope, e.get("document_id"), e.get("page"))]
+    # 章節同樣只取錨點的（用全部證據算等於把要丟掉的離題章節也算成合法範圍）
+    sections = evidence_sections(evidence[:3])
+    kept = [e for e in evidence if in_scope(scope, e.get("document_id"), e.get("page"),
+                                            sections, e.get("section_path"))]
     if len(kept) < _MIN_EVIDENCE_TO_PRUNE:
         return evidence      # 收斂過頭 → 放棄收斂
     if len(kept) < len(evidence):
@@ -572,7 +609,8 @@ def _grounded_synthesis(
         db, question, rag_evidence, kg_notes, conversation_history)
     if not ensure_values:
         return _flag_unsourced_values(
-            ans, [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
+            _degrade_empty_tables(ans),
+            [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
         ), sources, n_used, n_total
 
     # 補查輪數是「整個請求」共用的預算，不是每個呼叫點各自 3 輪。
@@ -596,6 +634,7 @@ def _grounded_synthesis(
         # 實測查沙塵測試時，關鍵字「Test temperature(s)」把黴菌測試（頁 240）的
         # 培養溫度與礦物鹽配方撈回來，答案把它當成沙塵測試條件。
         scope = evidence_scope([(e.get("document_id"), e.get("page")) for e in evidence])
+        sections = evidence_sections(evidence)
         fresh: List[Dict[str, Any]] = []
         for term in terms[:4]:
             try:
@@ -604,7 +643,8 @@ def _grounded_synthesis(
                 logger.warning("ensure_values 補查「%s」失敗: %s", term, e)
                 continue
             for ev in more:
-                if not in_scope(scope, ev.get("document_id"), ev.get("page")):
+                if not in_scope(scope, ev.get("document_id"), ev.get("page"),
+                                sections, ev.get("section_path")):
                     continue
                 k = (ev.get("document_id"), ev.get("page"),
                      (ev.get("snippet") or ev.get("text") or "")[:48])
@@ -625,8 +665,11 @@ def _grounded_synthesis(
             ans, sources, n_used, n_total = new_ans, new_sources, new_used, new_total
     # 補查迴圈已結束，此時才做來源查核（放在迴圈內會讓警示文字
     # 干擾 _needs_deeper_search 的判斷，見 _synthesize_grounded 的註解）。
-    ans = _flag_unsourced_values(ans, [{"text": e.get("snippet") or e.get("text") or ""}
-                                       for e in rag_evidence])
+    # 表格降級同樣要等迴圈結束：迴圈內降級會讓 _needs_deeper_search 看不到
+    # 那張空表格，反而以為「答案沒有數值需求」而提早收手，少查一輪。
+    ans = _flag_unsourced_values(_degrade_empty_tables(ans),
+                                 [{"text": e.get("snippet") or e.get("text") or ""}
+                                  for e in rag_evidence])
     return ans, sources, n_used, n_total
 
 
@@ -678,6 +721,72 @@ def _flag_unsourced_values(answer: Optional[str], contexts: List[Dict[str, Any]]
     logger.info("答案含 %d 個脈絡中查不到的數值：%s", len(unsourced), unsourced[:5])
     return (answer.rstrip() + "\n\n⚠️ 下列數值未能在本次引用的段落中找到，請自行查證："
             + "、".join(unsourced[:8]))
+
+
+_TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|[\s:\-|]+\|\s*$")
+# 「這格其實沒有內容」的常見寫法。模型不會留白，它會填一個看起來很專業的佔位字。
+_PLACEHOLDER_RE = re.compile(
+    r"^(?:[-—–~]+|n/?a|tbd|未?(?:指定|規定|說明|提供|列出)|無|不適用|依(?:測試|試驗)?計畫(?:指定|規定)?"
+    r"|見(?:測試|試驗)?計畫|由(?:採購|使用)?單位(?:指定|決定)|待定|如上|同上|\?+)$",
+    re.IGNORECASE)
+
+
+def _split_row(line: str) -> List[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _degrade_empty_tables(answer: Optional[str]) -> Optional[str]:
+    """把「有格線、沒內容」的表格降級成條列。
+
+    為什麼需要確定性把關：提示詞裡的「嚴禁造出沒有內容的表格」被實測反覆無視。
+    模型遇到「原文只列出項目名稱、數值要由測試計畫指定」時，仍會排出一張漂亮的
+    三欄表，每列的數值欄都填「依測試計畫指定」——排版看起來像查到了東西，
+    使用者要逐格讀完才發現一個數字都沒有。這比直接說「原文未給值」更浪費時間。
+
+    判定條件刻意保守，三個都成立才降級：
+      1. 資料列 ≥3（1–2 列可能只是還沒填完，不足以判斷）
+      2. 第一欄以外的所有格子都不含任何數值 token
+      3. 那些格子去重後只剩 ≤2 種寫法，且全部是佔位字
+    只要表格裡有任何一個真數值就原樣保留 —— 誤降級一張真表格的代價，
+    遠高於漏掉一張空表格。
+    """
+    if not answer or "|" not in answer:
+        return answer
+    lines = answer.splitlines()
+    out: List[str] = []
+    i = 0
+    degraded = 0
+    while i < len(lines):
+        if not _TABLE_LINE_RE.match(lines[i]):
+            out.append(lines[i]); i += 1; continue
+        j = i
+        while j < len(lines) and _TABLE_LINE_RE.match(lines[j]):
+            j += 1
+        block = lines[i:j]
+        body = [ln for ln in block[1:] if not _TABLE_SEP_RE.match(ln)]
+        cells = [c for ln in body for c in _split_row(ln)[1:] if c]
+        is_empty = (
+            len(body) >= 3
+            and cells
+            and not any(_VALUE_TOKEN_RE.search(c) for c in cells)
+            and len({c.lower() for c in cells}) <= 2
+            and all(_PLACEHOLDER_RE.match(c) for c in cells)
+        )
+        if is_empty:
+            names = [r[0] for r in (_split_row(ln) for ln in body) if r and r[0]]
+            out.append("以下為原文列出、但數值需由測試計畫另行指定的項目：")
+            out.extend(f"- {n}" for n in names)
+            degraded += 1
+        else:
+            out.extend(block)
+        i = j
+    if not degraded:
+        # 一張都沒降級就回原字串：splitlines/join 會吃掉尾端換行，
+        # 對「什麼都沒改」的情況造成不必要的差異。
+        return answer
+    logger.info("降級 %d 張無內容表格為條列", degraded)
+    return "\n".join(out)
 
 
 def _synthesize_grounded(
@@ -1142,6 +1251,8 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
             "page": chunk.page,
             "score": score,
             "snippet": text,
+            # 章節標籤（只有 810H 有；其餘文件為 None）供 in_scope 判斷是否同一個測試方法
+            "section_path": getattr(chunk, "section_path", None),
         })
     return evidence, confidence
 

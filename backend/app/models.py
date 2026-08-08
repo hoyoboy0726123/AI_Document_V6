@@ -218,6 +218,10 @@ class DocumentChunk(BaseMixin, Base):
     page: Mapped[Optional[int]] = mapped_column(Integer)
     paragraph_index: Mapped[Optional[int]] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    # 這個 chunk 落在哪個章節，例如 "METHOD 509.7" 或 "METHOD 504.3, ANNEX A"。
+    # 由 kg_headings 抽出的標題回填（scripts/backfill_section_path.py），沒有標題的
+    # 文件留 NULL。用途是取代「±15 頁」這種土法來判斷兩段證據是否屬於同一個測試方法。
+    section_path: Mapped[Optional[str]] = mapped_column(String(200))
     embedding: Mapped[List[float]] = mapped_column(MutableList.as_mutable(JSON), default=list, nullable=False)
     # BigInteger: faiss_id 是 uuid4 % 2^63，SQLite 沒事但 PostgreSQL 的 INTEGER 是 32-bit
     # 會 NumericValueOutOfRange（audit H6）。BigInteger 在 SQLite 仍映射為 INTEGER，相容。
