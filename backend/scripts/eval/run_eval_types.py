@@ -67,7 +67,10 @@ def _mentions_subject(subjects: list, text: str) -> bool:
 _DENIAL_RE = re.compile(
     r"(未(?:有)?(?:針對|規定|提及|說明|提供|列出)|沒有(?:相關|這|此|針對)|不適用|"
     r"查無|無法(?:在|從).{0,12}找到|並(?:未|沒有)(?:規定|提及|包含|涵蓋)|"
-    r"不屬於|不存在|not (?:specified|applicable|found))")
+    r"不屬於|不存在|not (?:specified|applicable|found)|"
+    # 系統的確定性標註：問句前提查不到依據、以及主體一致性未過時的回覆。
+    # 這兩種都是正確行為，評分器必須認得，否則修好了也量不出來。
+    r"未能在.{0,20}找到|不代表規範確有此規定|屬於其他測試項目|可能未規定此項)")
 
 
 def _refused(text: str, forbidden: list | None = None) -> bool:
@@ -153,8 +156,11 @@ def main() -> None:
             elif kind == "followup":
                 first_ok = _hits(it["gold"], ans) > 0
                 try:
-                    hist = [{"role": "user", "content": it["q"]},
-                            {"role": "assistant", "content": ans}]
+                    # 對話歷史的真實欄位是 question/answer（見 api/v1/rag.py），
+                    # 不是 OpenAI 風格的 role/content。第一版用錯格式，
+                    # _history_subject 讀不到任何東西，量到的「追問跑題」
+                    # 有一部分是評測自己造成的。
+                    hist = [{"question": it["q"], "answer": ans}]
                     ans2, _ = answer(it["followup"], hist, it.get("route", "rag"))
                 except Exception as exc:  # noqa: BLE001
                     ans2 = f"(追問失敗: {exc})"

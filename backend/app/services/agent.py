@@ -19,6 +19,7 @@ import logging
 import re
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from . import agent_tools, ai
@@ -180,6 +181,122 @@ _SUBJECT_RE = re.compile(
 )
 
 
+# 中文測試名 → 語料裡對應的英文詞。語料全是英文，中文提問時「淋雨」在文件中
+# 一次都不會出現，光靠向量相似度不足以把主體帶進檢索。
+#
+# 為什麼需要它（實測）：問「淋雨測試的鹽溶液濃度規定是多少」，候選池前 10 名
+# 全是鹽相關段落（METHOD 509.7 鹽霧 + MIL-STD-331D 第 134 頁），
+# 沒有任何一塊來自 METHOD 506.6 —— 主體被完全丟棄，只剩參數在驅動檢索。
+# 系統於是拿引信規範的鹽溶液比重回答淋雨測試，數值真實、來源真實、結論錯誤。
+#
+# 這是白名單，一定會有漏網，但用法是「有登錄才查核，沒登錄就放行」——
+# 漏網只是回到現狀，不會造成新的誤擋。
+_SUBJECT_TERMS = {
+    # 「drip」單獨用不行 —— 鹽霧方法裡的「不得讓冷凝水滴落在試件上」也含這個字，
+    # 足以讓淋雨題誤判成「證據有談淋雨」。要用完整詞組才有鑑別度。
+    "淋雨": ["rain", "water spray", "drip test"], "降雨": ["rain", "water spray"],
+    "鹽霧": ["salt fog", "salt spray"], "黴菌": ["fungus", "fungal"], "真菌": ["fungus", "fungal"],
+    "沙塵": ["sand", "dust"], "砂塵": ["sand", "dust"],
+    "濕度": ["humidity", "humid"], "高溫": ["high temperature", "hot"],
+    "低溫": ["low temperature", "cold"], "溫度衝擊": ["temperature shock", "thermal shock"],
+    "振動": ["vibration"], "震動": ["vibration"], "衝擊": ["shock"],
+    "加速度": ["acceleration"], "太陽": ["solar"], "輻射": ["solar", "radiation"],
+    "低壓": ["low pressure", "altitude"], "高度": ["altitude"],
+    "爆炸": ["explosive", "explosion"], "酸性": ["acidic"],
+    "結冰": ["icing", "freezing"], "凍雨": ["freezing rain"],
+    "噪音": ["noise", "acoustic"], "彈跳": ["bounce"], "落下": ["drop"], "傾斜": ["inclination"],
+}
+
+
+def subject_terms(question: str) -> List[str]:
+    """問句主體在語料中的檢索詞（含主體本身）。沒登錄的主體回空清單。"""
+    subj = _find_subject(question or "")
+    if not subj:
+        return []
+    terms = _SUBJECT_TERMS.get(subj)
+    return ([subj] + terms) if terms else []
+
+
+_SUBJECT_METHOD_CACHE: Dict[str, set] = {}
+_SUBJECT_METHOD_MIN_CHUNKS = 8
+_SUBJECT_METHOD_MIN_DENSITY = 0.5
+
+
+def subject_methods(db: Session, subject: str) -> set:
+    """主體對應到哪些章節（方法）。從語料密度推導，不寫死方法編號。
+
+    作法：對每個章節，算「有多少比例的 chunk 提到該主體的英文詞」，
+    比例 ≥50% 且該章節至少 8 塊的才算。實測密度非常乾淨：
+        沙塵 → METHOD 510.7 94%      黴菌 → METHOD 508.8 80%
+        濕度 → METHOD 507.6 90%      衝擊 → METHOD 516.8 93% / 519.8 90%
+    取「集合」而非「最高的那一個」很重要 —— 振動同時屬於 514.8(85%) 與
+    528.1(84%)，只取最大值會把 528.1 的正確答案誤擋掉。
+
+    為什麼需要它：只檢查「有沒有任何一塊提到主體」擋不住 x03 —— 問沙塵測試
+    要哪些黴菌菌種，回來的是 METHOD 508.8 的段落，其中偶然出現一次 dust，
+    整組證據就被判定為「有談沙塵」。要看章節歸屬才擋得住。
+    """
+    if subject in _SUBJECT_METHOD_CACHE:
+        return _SUBJECT_METHOD_CACHE[subject]
+    terms = _SUBJECT_TERMS.get(subject)
+    if not terms:
+        _SUBJECT_METHOD_CACHE[subject] = set()
+        return set()
+    pats = [re.compile(r"\b" + re.escape(t) + r"\b") for t in terms]
+    hit: Dict[str, int] = {}
+    tot: Dict[str, int] = {}
+    try:
+        rows = db.execute(sa_text(
+            "SELECT section_path, text FROM document_chunks WHERE section_path IS NOT NULL"
+        )).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("subject_methods 查詢失敗: %s", exc)
+        return set()
+    for sp, txt in rows:
+        base = (sp or "").split(",")[0].strip()
+        tot[base] = tot.get(base, 0) + 1
+        low = (txt or "").lower()
+        if any(p.search(low) for p in pats):
+            hit[base] = hit.get(base, 0) + 1
+    found = {b for b, n in tot.items()
+             if n >= _SUBJECT_METHOD_MIN_CHUNKS
+             and hit.get(b, 0) / n >= _SUBJECT_METHOD_MIN_DENSITY}
+    _SUBJECT_METHOD_CACHE[subject] = found
+    logger.info("主體「%s」對應章節：%s", subject, sorted(found) or "（無）")
+    return found
+
+
+def evidence_matches_subject(question: str, evidence: List[Dict[str, Any]],
+                             db: Optional[Session] = None) -> bool:
+    """候選證據裡有沒有任何一塊真的在談問句指名的那個測試。
+
+    只要有一塊命中就算通過 —— 目的是抓「一塊都沒有」的極端情況，
+    那才是「主體被丟棄」的訊號。部分命中屬於正常的檢索雜訊。
+    """
+    terms = subject_terms(question)
+    if not terms or not evidence:
+        return True                      # 主體未登錄或根本沒證據 → 不查核（fail open）
+    # 英文詞要用詞界比對：rain 是 drain / training / constraint 的子字串，
+    # 直接 in 判斷會讓幾乎任何段落都「命中主體」，閘門等於沒有。
+    pats = [re.compile(r"\b" + re.escape(t.lower()) + r"\b") if t.isascii()
+            else re.compile(re.escape(t)) for t in terms]
+    methods = subject_methods(db, _find_subject(question)) if db is not None else set()
+
+    for e in evidence:
+        sp = (e.get("section_path") or "").split(",")[0].strip()
+        if sp:
+            # 有章節標籤 → 以章節歸屬為準。標籤在但屬於別的方法，就是
+            # 「內容其實在講另一項測試」，內文偶然出現一次主體詞不算數。
+            if methods and sp in methods:
+                return True
+            if methods:
+                continue
+        blob = ((e.get("snippet") or e.get("text") or "") + " " + sp).lower()
+        if any(p.search(blob) for p in pats):
+            return True
+    return False
+
+
 # 「X測試／X試驗」的通用式主體。_SUBJECT_RE 是寫死的測試類型白名單，一定會有漏網：
 # 實測「冷凝測試方法與條件」因為白名單沒有「冷凝」而被判成無主體，於是繼承了
 # 上一輪的「濕度」去查 —— 使用者問的明明是另一項測試。
@@ -221,6 +338,66 @@ def _history_subject(conversation_history: Optional[List[Dict[str, Any]]]) -> Op
             if found:
                 return found
     return None
+
+
+# 追問裡「只是個參數名」的詞。它們同時也在 _SUBJECT_RE 的白名單裡（濕度測試、
+# 溫度衝擊測試都是真的測試方法），所以單看白名單無法分辨這兩種用法：
+#     「濕度測試的條件是什麼」→ 濕度是主體
+#     「那濕度呢」（承接上一輪的鹽霧測試）→ 濕度是參數
+_PARAM_NOUNS = {"濕度", "溫度", "高溫", "低溫", "壓力", "高度", "低壓", "時間",
+                "風速", "濃度", "頻率", "加速度", "電壓", "電流", "噪音", "輻射"}
+_FOLLOWUP_MAX_LEN = 18
+
+
+def resolve_followup_question(question: str,
+                              conversation_history: Optional[List[Dict[str, Any]]]) -> str:
+    """追問若省略了主體，補上上一輪的主體後再去檢索。
+
+    實測三種會跑題的追問（承接「鹽霧測試的箱體溫度」之後）：
+        「那濕度呢」        → 被當成「濕度測試」，撈回 Method 507.6 的內容
+        「這個測試要跑多久」 → 完全沒有主體，撈回振動測試的 20 小時飛行時間
+        「要跑幾個循環」     → 同上
+    第一種最難察覺：_find_subject 在白名單裡找到「濕度」就認定有主體了，
+    而「濕度」既是參數名也是測試名。用「問句很短 + 沒有測試/試驗後綴 +
+    沒有規範編號」三個條件一起判，才分得開這兩種用法。
+
+    只在有對話歷史時作用 —— 左側面板的新問題不帶歷史，不會被改寫
+    （「冷凝測試方法與條件」被誤當追問的那個舊問題就是這樣來的）。
+    """
+    q = (question or "").strip()
+    if not q or not conversation_history:
+        return question
+    inherited = _history_subject(conversation_history)
+    if not inherited:
+        return question
+
+    subject = _find_subject(q)
+    if subject:
+        # 有主體，但可能只是個參數名被誤認
+        bare_param = (
+            subject in _PARAM_NOUNS
+            and len(q) <= _FOLLOWUP_MAX_LEN
+            and not re.search(r"測試|試驗|MIL-|Method\s*\d|方法\s*\d|\d{3}\.\d", q)
+        )
+        if not bare_param:
+            return question
+    elif len(q) > _FOLLOWUP_MAX_LEN:
+        # 沒主體但問得長 → 多半是獨立的新問題（「請詳細說明整份規範的剪裁流程…」），
+        # 不要硬套上一輪的主體。這種情況留給底下原有的分支處理，行為不變。
+        return question
+
+    if _find_subject(str(inherited)) and inherited in q:
+        return question         # 已經自己帶了同一個主體
+
+    # 指示詞要整個拿掉，不能只吃一個字 ——「這個測試要跑多久」只去掉「這」
+    # 會變成「個測試要跑多久」，拼出來的查詢句是壞的。
+    core = re.sub(r"^(這個|那個|此|該|這|那|那麼|然後|接著|再來|還有|以及|and|then)\s*", "", q)
+    core = re.sub(r"^(測試|試驗)(?=[要有的])", "", core)
+    core = re.sub(r"[呢嗎吧？?]+$", "", core).strip() or q
+    base = inherited if re.search(r"測試|試驗$", inherited) else f"{inherited}測試"
+    rewritten = f"{base}的{core}"
+    logger.info("追問補主體：「%s」→「%s」", q, rewritten)
+    return rewritten
 
 
 def _clarify_scope_text(db: Session, question: str) -> str:
@@ -608,10 +785,11 @@ def _grounded_synthesis(
     ans, sources, n_used, n_total = _synthesize_grounded(
         db, question, rag_evidence, kg_notes, conversation_history)
     if not ensure_values:
-        return _flag_unsourced_values(
-            _degrade_empty_tables(ans),
-            [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
-        ), sources, n_used, n_total
+        _ctx = [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
+        return _flag_unverified_premise(
+            question,
+            _flag_unsourced_values(_degrade_empty_tables(ans), _ctx),
+            _ctx), sources, n_used, n_total
 
     # 補查輪數是「整個請求」共用的預算，不是每個呼叫點各自 3 輪。
     # 單次 agent 執行會經過多個合成點，各跑各的會累積成十幾次 LLM 生成，
@@ -667,9 +845,9 @@ def _grounded_synthesis(
     # 干擾 _needs_deeper_search 的判斷，見 _synthesize_grounded 的註解）。
     # 表格降級同樣要等迴圈結束：迴圈內降級會讓 _needs_deeper_search 看不到
     # 那張空表格，反而以為「答案沒有數值需求」而提早收手，少查一輪。
-    ans = _flag_unsourced_values(_degrade_empty_tables(ans),
-                                 [{"text": e.get("snippet") or e.get("text") or ""}
-                                  for e in rag_evidence])
+    _ctx = [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
+    ans = _flag_unsourced_values(_degrade_empty_tables(ans), _ctx)
+    ans = _flag_unverified_premise(question, ans, _ctx)
     return ans, sources, n_used, n_total
 
 
@@ -721,6 +899,38 @@ def _flag_unsourced_values(answer: Optional[str], contexts: List[Dict[str, Any]]
     logger.info("答案含 %d 個脈絡中查不到的數值：%s", len(unsourced), unsourced[:5])
     return (answer.rstrip() + "\n\n⚠️ 下列數值未能在本次引用的段落中找到，請自行查證："
             + "、".join(unsourced[:8]))
+
+
+def _flag_unverified_premise(question: str, answer: Optional[str],
+                             contexts: List[Dict[str, Any]]) -> Optional[str]:
+    """問句自己帶了數值、但檢索不到依據時，先標明前提未經證實。
+
+    實測「鹽霧測試規定的最長連續曝露時間是 30 天，這個數字的依據是什麼」——
+    系統開始替 30 天找理由，而規範裡根本沒有這個數字。假的方法編號擋得住
+    （查無相關資料），假的數字擋不住，因為數字聽起來就像規範會有的東西，
+    而檢索總能撈回一些「談曝露時間」的段落來支撐它。
+
+    這是 _flag_unsourced_values 的鏡像：那支查答案裡的數值，這支查問句裡的。
+    同樣只標註不改寫 —— 使用者可能是引用了別份文件的真實數字來對照。
+    """
+    if not question or not answer or not contexts:
+        return answer
+    haystack = _norm_for_match(" ".join(c.get("text") or "" for c in contexts))
+    unverified: List[str] = []
+    for m in _VALUE_TOKEN_RE.finditer(question):
+        # 必須連單位一起比對。只比裸數字沒有意義 ——「30」在任何一份規範裡
+        # 都找得到（頁碼、其他參數、表格列號），於是假前提永遠「查得到依據」。
+        token = _norm_for_match(m.group(0))
+        if token and token not in haystack:
+            v = re.sub(r"\s+", " ", m.group(0)).strip()
+            if v not in unverified:
+                unverified.append(v)
+    if not unverified:
+        return answer
+    logger.info("問句前提未獲證實：%s", unverified[:3])
+    return ("⚠️ 問題中提到的「" + "」「".join(unverified[:3])
+            + "」未能在檢索到的段落中找到依據，以下說明不代表規範確有此規定。\n\n"
+            + answer)
 
 
 _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
@@ -963,7 +1173,44 @@ def route_mode(question: str) -> str:
 def run_rag_only(db: Session, question: str,
                  conversation_history: Optional[List[Dict[str, Any]]] = None):
     """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。"""
+    # 追問補主體。Agent 路徑早就有這道處理，這條分支沒有 —— 於是承接
+    # 「鹽霧測試的箱體溫度」之後問「那濕度呢」，會撈回濕度測試的內容；
+    # 問「這個測試要跑多久」會撈回振動測試的 20 小時飛行時間。
+    # 混合模式路由到 RAG 分支是使用者最常走的路，這個漏洞影響面比 Agent 大。
+    question = resolve_followup_question(question, conversation_history)
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
+
+    subject_caution = ""
+    # 主體一致性查核：問句指名了某項測試，但候選證據裡一塊都沒談到它。
+    # 這代表檢索只滿足了參數（「鹽溶液濃度」）而把主體（「淋雨測試」）丟了，
+    # 接下來合成出的答案會是「別的測試的真實數值」——最難察覺的一種錯。
+    if seeded and not evidence_matches_subject(question, seeded, db):
+        terms = subject_terms(question)
+        logger.info("主體一致性未過，改用英文詞重查：%s", terms[1:])
+        retry_q = f"{' '.join(terms[1:])} {question}"
+        try:
+            reseeded, re_conf = _seed_evidence_via_rag(db, retry_q, top_k=5)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("主體重查失敗: %s", exc)
+            reseeded, re_conf = [], None
+        if reseeded and evidence_matches_subject(question, reseeded, db):
+            seeded, _conf = reseeded, re_conf
+            # 重查有救回主體，但「原始檢索一塊都沒命中主體」本身就是訊號：
+            # 這項參數多半不由該測試規範。實測救回 METHOD 506.6 的內容後，
+            # 模型仍用「淋雨測試的鹽溶液濃度規定如下」開頭，再把降雨流量填進去 ——
+            # 換了正確的來源，卻仍在回答一個不存在的問題。
+            subject_caution = (
+                f"⚠️ 原始檢索結果不屬於「{_find_subject(question)}」測試，已改用該測試的內容重新檢索。"
+                f"若下列內容未直接回答所問的參數，表示該測試可能未規定此項，請勿套用其他測試的數值。\n\n")
+        else:
+            # 重查後仍然沒有 —— 這份規範的該項測試很可能真的沒有這個參數。
+            # 誠實說沒有，遠好過拿另一項測試的數值來充數。
+            subj = _find_subject(question)
+            logger.info("主體「%s」重查後仍無相關段落，改為誠實回覆", subj)
+            return (f"可用段落中找不到「{subj}」相關測試對此問題的規定 —— "
+                    f"檢索到的內容屬於其他測試項目，不能直接套用。\n\n"
+                    f"建議確認該項參數是否確實由此測試規範，或改以規範編號／方法編號查詢。",
+                    [])
 
     # 低信心兜底 —— 這道防線原本只存在於 rag.py 的 /query 端點，這裡漏了，
     # 而本函式正是「混合模式路由到 RAG 分支」時實際跑的程式碼。
@@ -991,7 +1238,7 @@ def run_rag_only(db: Session, question: str,
                                                     retry_budget=_new_retry_budget())
     if ans and ans.strip():
         note = _coverage_note(max(0, n_total - n_used), 0)
-        return ans.strip() + (note or ""), sources
+        return subject_caution + ans.strip() + (note or ""), sources
     closest = [{"title": ev.get("title"), "page": ev.get("page"), "text": ev.get("snippet")}
                for ev in seeded[:3]]
     low_src = [{"document_id": ev.get("document_id"), "title": ev.get("title"), "page": ev.get("page"),
@@ -1374,6 +1621,11 @@ def run_agent(
     #   (b) 走結構工具列出 30 個方法後提早 return，耗掉 9-14 步才給一份清單
     # 兩者都不如一開始就問清楚，而且省下整輪模型呼叫。
     # 對話歷史已指明對象時（例如上一輪在談振動測試）視為有主體，不重複反問。
+    # 先做「參數型追問」的補主體（「那濕度呢」這種白名單誤判成有主體的情況）。
+    # 底下原有的分支只處理「完全沒有主體」，而且要求 _wants_values —— 實測
+    # 「這個測試要跑多久」兩個條件都不成立，於是整段跳過。
+    question = resolve_followup_question(question, conversation_history)
+
     if _lacks_subject(question) and _wants_values(question):
         inherited = _history_subject(conversation_history)
         if inherited:
