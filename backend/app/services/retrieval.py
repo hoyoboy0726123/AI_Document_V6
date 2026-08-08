@@ -237,6 +237,29 @@ def resolve_spec_scope(db: Session, question: str) -> Tuple[str, Optional[str]]:
     return (stripped or question), doc_id
 
 
+def resolve_spec_docs(db: Session, question: str) -> Tuple[str, List[str]]:
+    """多規範版的 resolve_spec_scope：回傳 (去編號的字串, 所有命中的 document_id)。
+
+    resolve_spec_scope 只取第一個命中的編號就 break，對「A 與 B 各是多少」
+    這種比較題會整個偏向其中一份。實測「MIL-STD-810H 的溫度量測公差與
+    MIL-STD-331D 的溫度量測公差各是多少」候選池 10 塊裡 9 塊來自 810H、
+    0 塊來自 331D —— 系統回「查無相關資料」，因為它其實只查了一份。
+    """
+    ids = _SPEC_ID_IN_QUERY_RE.findall(question or "")
+    doc_ids: List[str] = []
+    if ids:
+        docs = db.query(models.Document.id, models.Document.title).all()
+        for raw in ids:
+            norm = re.sub(r"\s+", "", raw).upper()
+            for doc in docs:
+                if norm in re.sub(r"\s+", "", (doc.title or "")).upper():
+                    if doc.id not in doc_ids:
+                        doc_ids.append(doc.id)
+                    break
+    stripped = re.sub(r"\s+", " ", _SPEC_ID_IN_QUERY_RE.sub(" ", question or "")).strip()
+    return (stripped or question), doc_ids
+
+
 def hybrid_retrieve(
     db: Session,
     query: str,

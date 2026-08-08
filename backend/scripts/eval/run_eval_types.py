@@ -104,14 +104,17 @@ def main() -> None:
         want = {k.strip() for k in args.kind.split(",")}
         items = [i for i in items if i["kind"] in want]
 
-    from app.services.agent import run_agent, run_rag_only  # noqa: PLC0415
+    from app.services.agent import route_mode, run_agent, run_rag_only  # noqa: PLC0415
 
     def answer(question, history=None, route="rag"):
         """依題型走對應的管線。
 
-        關係題（引用／取代）在真實系統走 Agent 模式 —— 那裡才有 spec_references
-        等 KG 工具。第一版評測全部用 run_rag_only 跑，等於拿沒有 KG 的分支去考
-        KG 題，量到的 0.111 是我的評測設計錯誤，不是系統能力。
+        路由一律交給系統自己的 route_mode()，不由評測手動標註 —— 手動標註只能
+        驗證「送對分支時答得對不對」，驗不到「系統會不會送錯分支」。
+        實測列舉題就是被送錯的：「METHOD 514.8 底下有哪些 ANNEX」因為
+        「有哪些」與「ANNEX」之間的空格而不匹配 _ENUM_STRUCT_RE，被送去 RAG，
+        KG 裡完整的 ANNEX A–F 清單從來沒被用到。手動標 route=agent 會把
+        這個 bug 蓋掉。
         """
         if route != "agent":
             # 三元運算子的優先序低於逗號：寫成 `a if c else b, None` 會讓 c 為真時
@@ -131,7 +134,7 @@ def main() -> None:
         for it in items:
             kind, qid = it["kind"], it["id"]
             try:
-                ans, _ = answer(it["q"], route=it.get("route", "rag"))
+                ans, _ = answer(it["q"], route=route_mode(it["q"]))
             except Exception as exc:  # noqa: BLE001
                 print(f"  [ERR] {qid} {exc}")
                 per_kind[kind]["n"] += 1
@@ -161,7 +164,7 @@ def main() -> None:
                     # _history_subject 讀不到任何東西，量到的「追問跑題」
                     # 有一部分是評測自己造成的。
                     hist = [{"question": it["q"], "answer": ans}]
-                    ans2, _ = answer(it["followup"], hist, it.get("route", "rag"))
+                    ans2, _ = answer(it["followup"], hist, route_mode(it["followup"]))
                 except Exception as exc:  # noqa: BLE001
                     ans2 = f"(追問失敗: {exc})"
                 second_ok = _mentions_subject(it["gold_followup_subject"], ans2 or "")

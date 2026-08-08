@@ -1112,7 +1112,7 @@ def _coverage_note(n_unused_sources: int, kg_edges_seen: int) -> str:
 
 
 _ENUM_RE = re.compile(
-    r"(有哪些|哪些|列出|列舉|清單|子項目|有什麼|包含哪些|底下有|下有|"
+    r"(有哪些|哪些|哪幾個|幾個|列出|列舉|清單|子項目|有什麼|包含哪些|底下有|下有|"
     r"sub[- ]?items?|list all|list the|what .*(items|tests|sub)|which .*(items|tests))",
     re.IGNORECASE,
 )
@@ -1143,7 +1143,11 @@ _RELATION_RE = re.compile(
 # 刻意排除「哪些數值/資訊/數據/條件」這類其實是內容題的問法（那些走 RAG 更好）。
 _ENUM_STRUCT_RE = re.compile(
     r"((子|sub-?\s?)(項目|測試|程序|test|item|procedure)|列出所有|全部列出|列舉|"
-    r"有哪些(測試|方法|程序|步驟|項目|子|method|annex|附錄|章節))",
+    # 「有哪些」與名詞之間必須容許空白：實測「METHOD 514.8 底下有哪些 ANNEX」
+    # 因為中間那個半形空格而不匹配，route_mode 於是把它送去 RAG 分支，
+    # KG 裡明明有完整正確的 ANNEX A–F 清單卻從來沒被用到。
+    # 「有幾個 / 包含哪幾個」也是同樣的列舉意圖，原本完全沒涵蓋。
+    r"(有|包含)\s*(哪些|幾個|哪幾個)\s*(測試|方法|程序|步驟|項目|子|method|annex|附錄|章節))",
     re.IGNORECASE,
 )
 
@@ -1480,7 +1484,26 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
     embeddings = ai.embed_query(question)
     if not embeddings:
         return [], None
-    filtered = retrieval.hybrid_retrieve(db, question, embeddings[0], top_k)
+
+    # 比較題（問句同時點名 2 份以上規範）必須分頭查再合併。單次檢索一定會被
+    # 其中一份主導：實測「810H 的溫度量測公差與 331D 的…各是多少」候選池
+    # 10 塊裡 9 塊來自 810H、0 塊來自 331D，於是系統回「查無相關資料」——
+    # 它其實只查了一份，另一份根本沒進候選池，rerank 再強也救不回來。
+    stripped_q, spec_docs = retrieval.resolve_spec_docs(db, question)
+    if len(spec_docs) >= 2:
+        per_doc = max(2, top_k // len(spec_docs))
+        emb2 = ai.embed_query(stripped_q) or embeddings
+        filtered = []
+        for did in spec_docs:
+            try:
+                filtered.extend(retrieval.hybrid_retrieve(
+                    db, stripped_q, emb2[0], per_doc, document_id=did))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("比較題分頭檢索失敗 doc=%s: %s", did[:8], exc)
+        logger.info("比較題分頭檢索：%d 份規範，各取 %d 塊，共 %d 塊",
+                    len(spec_docs), per_doc, len(filtered))
+    else:
+        filtered = retrieval.hybrid_retrieve(db, question, embeddings[0], top_k)
     if not filtered:
         return [], None
     confidence = rerank.top_relevance(question, [c for c, _ in filtered])
@@ -1502,6 +1525,26 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
             "section_path": getattr(chunk, "section_path", None),
         })
     return evidence, confidence
+
+
+def enumeration_target(db: Session, question: str) -> Optional[str]:
+    """列舉題真正要列的對象。解析不出更具體的層級時回 None（照舊用整句去查）。
+
+    直接把整句丟給 list_subitems 會解析到「文件」層級：
+        「MIL-STD-810H 的 METHOD 514.8 底下有哪些 ANNEX」→ 回整份規範的 30 個 Method
+        「黴菌測試方法底下有幾個附錄」               → 同上
+    兩題使用者要的都是某一個方法的附錄。問句裡有方法編號就用它；只有測試名稱
+    時用語料密度推導的對應表換算（黴菌 → METHOD 508.8）。
+    """
+    m = re.search(r"(?:METHOD|方法)\s*(\d{3}\.\d)", question or "", re.I)
+    if m:
+        return f"METHOD {m.group(1)}"
+    subj = _find_subject(question or "")
+    if subj and not _SPEC_ID_RE.search(question or ""):
+        methods = subject_methods(db, subj)
+        if len(methods) == 1:
+            return next(iter(methods))
+    return None
 
 
 def _build_enumeration_answer(db: Session, chosen: Dict[str, Any], rag_evidence, conversation_history):
@@ -1708,7 +1751,8 @@ def run_agent(
         and not _APP_RE.search(question)
     ):
         try:
-            fb = agent_tools.run_tool(db, "list_subitems", {"name": question})
+            fb = agent_tools.run_tool(
+                db, "list_subitems", {"name": enumeration_target(db, question) or question})
         except Exception as e:
             logger.warning("enumeration list_subitems failed: %s", e)
             fb = None
@@ -1968,15 +2012,43 @@ def run_agent(
     ql = question.lower()
     chosen = None
     if is_enum_q:
-        for sr in structural_results:
-            if (sr.get("matched") or "").lower() in ql and sr.get("subitems"):
-                chosen = sr
-                break
+        # 列舉對象由「問句自己」決定，不看 LLM 這一輪剛好呼叫了什麼。
+        #
+        # 實測兩種都會落到文件層級、回整份規範的 30 個 Method：
+        #   「MIL-STD-810H 的 METHOD 514.8 底下有哪些 ANNEX」——問句同時有文件與
+        #     方法，LLM 查了文件，單一結果捷徑就把它當答案
+        #   「黴菌測試方法底下有幾個附錄」——沒有方法編號，解析不到實體
+        # 兩題使用者要的都是某一個方法的附錄，不是整份規範的方法清單。
+        #
+        # 先試「問句裡的方法編號」，再試「測試名稱換算成方法」（用語料密度
+        # 推導的對應表），都不成才退回 LLM 的結果。
+        target = enumeration_target(db, question)
+        if target:
+            tr = agent_tools.run_tool(db, "list_subitems", {"name": target})
+            if isinstance(tr, dict) and tr.get("subitems"):
+                logger.info("列舉題鎖定對象：%s（問句層級優先於 LLM 選擇）", target)
+                chosen = {"matched": tr.get("matched"), "subitems": tr["subitems"],
+                          "references": tr.get("references") or []}
+        if chosen is None:
+            for sr in structural_results:
+                if (sr.get("matched") or "").lower() in ql and sr.get("subitems"):
+                    chosen = sr
+                    break
         if chosen is None and len(structural_results) == 1 and structural_results[0].get("subitems"):
             chosen = structural_results[0]
     # 確定性 fallback：即使這一輪 LLM 沒呼叫 list_subitems，列舉題仍直接從問題字串解析實體並完整列舉。
     if chosen is None and is_enum_q:
-        fb = agent_tools.run_tool(db, "list_subitems", {"name": question})
+        # 問句用測試名稱指涉方法時（「黴菌測試底下有幾個附錄」），先把主體
+        # 換算成方法編號再查 —— 否則 list_subitems 解析不到實體，會退回文件層級
+        # 而列出整份規範的 30 個 Method。換算用的是從語料密度推導的對應表。
+        lookup = question
+        subj = _find_subject(question)
+        if subj and not re.search(r"MIL-|METHOD\s*\d|方法\s*\d|\d{3}\.\d", question, re.I):
+            methods = subject_methods(db, subj)
+            if len(methods) == 1:
+                lookup = next(iter(methods))
+                logger.info("列舉題主體「%s」換算為 %s", subj, lookup)
+        fb = agent_tools.run_tool(db, "list_subitems", {"name": lookup})
         if isinstance(fb, dict) and fb.get("subitems"):
             chosen = {
                 "matched": fb.get("matched"),
