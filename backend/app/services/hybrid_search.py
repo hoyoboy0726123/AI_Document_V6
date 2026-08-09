@@ -226,12 +226,15 @@ def _fts_query(path: str, match: str, top_k: int) -> List[Tuple[int, float]]:
 def keyword_search(db: Session, query: str, top_k: int) -> List[Tuple[int, float]]:
     """BM25 關鍵字檢索；回傳 [(faiss_id, bm25_score)]，bm25 越小越相關。"""
     if not getattr(settings, "RAG_HYBRID_SEARCH", True):
+        logger.info("keyword_search 略過：RAG_HYBRID_SEARCH=False")
         return []
     path = _sqlite_path(db)
     if not path:
+        logger.warning("keyword_search 略過：取不到 SQLite 路徑（非 SQLite 或 session 無 bind）")
         return []
     match = _build_match(query)
     if not match:
+        logger.info("keyword_search 略過：查詢無可用 term「%s」", query[:40])
         return []
     try:
         rows = _fts_query(path, match, top_k)
@@ -258,10 +261,16 @@ def keyword_search(db: Session, query: str, top_k: int) -> List[Tuple[int, float
         # 逾時就放生那個執行緒，讓查詢先走。
         limit = int(getattr(settings, "RAG_QUERY_TRANSLATE_TIMEOUT", 8) or 8)
         terms = _TRANSLATE_POOL.submit(_translate_for_keyword, query).result(timeout=limit)
+        # 這兩條原本是靜默 return —— 中文查詢因此完全失去 BM25 訊號，
+        # 而日誌上一個字都沒有。實測伺服器端就是走了這裡：同一題在腳本裡
+        # CE 0.997 答得出來，走 HTTP 卻回「查無相關資料」，查了很久才發現
+        # 差別在這條救援路徑靜默失敗。救援路徑失敗一定要留下痕跡。
         if not terms:
+            logger.warning("中文查詢 BM25 0 命中，翻譯回退取不到英文詞（空回應）→ 僅剩向量檢索：%s", query[:40])
             return rows
         retry_match = _build_match(terms)
         if not retry_match:
+            logger.warning("中文查詢 BM25 0 命中，翻譯結果無法組成 FTS 查詢「%s」→ 僅剩向量檢索", terms[:60])
             return rows
         rows = _fts_query(path, retry_match, top_k)
         logger.info(
