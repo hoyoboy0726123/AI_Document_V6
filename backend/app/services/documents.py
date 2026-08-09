@@ -436,10 +436,30 @@ class DocumentService:
                 # max_dimension=768 keeps image tokens well under Ollama's 4096 ctx —
                 # avoids qwen2.5vl GGML_ASSERT bug in Ollama 0.13.x+ when tokens overflow ctx.
                 image_bytes_list = pdf_pages_to_images(str(pdf_path), page_numbers, dpi=80, max_dimension=768)
-                segments = ai.extract_text_with_vision(image_bytes_list, page_numbers)
+                # 一併取 PDF 原生文字層供 VL 的形近字校正用（實測料號 22SW0 被
+                # 轉寫成 22SWO —— 這種錯不會被任何下游防線攔到，使用者照著查會查不到）。
+                # 取不到就照舊，校正只是加分項不是必要條件。
+                native_texts = {}
+                try:
+                    import fitz
+                    with fitz.open(str(pdf_path)) as _doc:
+                        for _i, _pg in enumerate(_doc, 1):
+                            native_texts[_i] = _pg.get_text()
+                except Exception as _exc:  # noqa: BLE001
+                    logger.warning("取原生文字層失敗，略過形近字校正: %s", _exc)
+                segments = ai.extract_text_with_vision(image_bytes_list, page_numbers, native_texts)
                 text = "\n\n".join(s.get("text", "") for s in segments if s.get("text"))
-                if document.content is None or not document.content.strip():
-                    document.content = text[:20000] if text else None
+                # VL 的結果明顯比既有 content 完整時要覆蓋掉它。
+                # 原本只在 content 空白時才寫入，於是先前那次貧弱的原生抽取
+                # （[Unit 0]基礎課程只抽到 1040 字）會一直卡在那裡，
+                # 而 chunk 已經有 VL 抽出的 14483 字 —— 兩者長期不一致。
+                # content 是摘要與分類的輸入，用爛的那份會連帶拖累它們。
+                _old = (document.content or "").strip()
+                if text and len(text) > max(len(_old) * 3 // 2, 1):
+                    if _old:
+                        logger.info("VL 抽取較完整（%d → %d 字），覆蓋既有 content",
+                                    len(_old), len(text))
+                    document.content = text[:20000]
                 self.db.commit()
             else:
                 # 沒有提供 segments，需要從 PDF 提取

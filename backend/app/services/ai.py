@@ -3,7 +3,7 @@ import io
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
@@ -682,13 +682,88 @@ def strip_markdown_fence_wrapper(text: str) -> str:
     return stripped
 
 
+# 我們自己塞進 prompt 的範例內容。模型會照抄，而抄進來的東西看起來就像文件內容 ——
+# 這不是「猜哪些是雜訊」，是「把自己放進去的東西拿回來」，所以濾掉是安全的。
+_PROMPT_ECHO_LINES = (
+    re.compile(r"^\s*\|\s*項目\s*\|\s*條件A\s*\|\s*條件B\s*\|\s*$"),
+    re.compile(r"^\s*\|\s*數值\s*\|\s*100\s*\|\s*200\s*\|\s*$"),
+    re.compile(r"^\s*\|\s*<col\d>\s*\|.*$", re.I),
+    re.compile(r"^\s*\|\s*<cell>\s*\|.*$", re.I),
+    re.compile(r"^\s*Here is the (markdown|converted).*$", re.I),
+)
+
+
+def _strip_prompt_echo(text: str) -> str:
+    """濾掉模型從 prompt 範例照抄過來的內容。
+
+    只濾「我們確定自己放進 prompt 的字串」，不做任何雜訊猜測 ——
+    後者已實測不可行：這份文件裡重複最多次的表格列是真的編碼原則表
+    （4 次），比範例表（2 次）還頻繁，用頻率當判準會刪掉真內容。
+    """
+    if not text:
+        return text
+    lines = text.splitlines()
+    kept = [ln for ln in lines if not any(p.match(ln) for p in _PROMPT_ECHO_LINES)]
+    if len(kept) == len(lines):
+        return text          # 沒有回聲就原字串回傳，不做任何其他處理
+    out = "\n".join(kept)
+    # 範例表被整張抄走時分隔列會留下孤兒。這條清理只在「確實移除了回聲」時才做 ——
+    # 無條件套用會砍到跨 chunk 被切開的真表格（實測 MIL-STD-1366E 有 9 塊
+    # 的分隔列剛好落在切點上，被誤判成孤兒）。
+    out = re.sub(r"\n\|\s*(?:-{3,}\s*\|)+\s*\n(?!\s*\|)", "\n", out)
+    return out
+
+
+_CODE_TOKEN_RE = re.compile(r"\b(?=[A-Z0-9-]{4,}\b)(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)[A-Z0-9-]+\b")
+# OCR/VL 最常見的形近混淆。只用這幾組是為了不把「真的不同的兩個料號」誤改成同一個。
+_CONFUSABLE = str.maketrans({"O": "0", "I": "1", "L": "1", "S": "5", "B": "8", "Z": "2"})
+
+
+def repair_code_tokens(vl_text: str, native_text: str) -> Tuple[str, int]:
+    """用 PDF 原生文字層修正 VL 轉寫的形近字錯誤，回傳 (修正後文字, 修正數)。
+
+    為什麼一定要修：實測這份教育訓練文件把料號 `22SW0` 轉寫成 `22SWO`
+    （數字 0 → 字母 O）。文件內容主體就是料號與代號，使用者照著查會查不到，
+    而答案看起來完全正常。軍規語料的數值有 _flag_unsourced_values 把關，
+    代碼類字串一條防線都沒有。
+
+    原生文字層是可信來源（PDF 自己的字元編碼），VL 只該用來補圖片與版面。
+    因此只在「原生層有這個 token、VL 沒有、但 VL 有它的形近變體」時才改 ——
+    不是猜測，是拿權威來源校正。
+    """
+    if not vl_text or not native_text:
+        return vl_text, 0
+    native_codes = set(_CODE_TOKEN_RE.findall(native_text.upper()))
+    if not native_codes:
+        return vl_text, 0
+    vl_codes = set(_CODE_TOKEN_RE.findall(vl_text.upper()))
+    # 以「去混淆後的形狀」建索引，找出 VL 版與原生版只差形近字的配對
+    by_shape: Dict[str, str] = {}
+    for c in native_codes:
+        by_shape.setdefault(c.translate(_CONFUSABLE), c)
+    fixed = 0
+    for v in vl_codes - native_codes:
+        target = by_shape.get(v.translate(_CONFUSABLE))
+        if target and target != v:
+            new = re.sub(r"\b" + re.escape(v) + r"\b", target, vl_text)
+            if new != vl_text:
+                vl_text = new
+                fixed += 1
+                logger.info("VL 形近字校正：%s → %s（依原生文字層）", v, target)
+    return vl_text, fixed
+
+
 def extract_text_with_vision(
     image_bytes_list: List[bytes],
     page_numbers: List[int],
+    native_texts: Optional[Dict[int, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Use VL model to extract text from PDF page images, preserving layout structure.
 
     Returns a list of segment dicts compatible with split_segments_into_chunks.
+
+    native_texts：{頁碼: PDF 原生文字層}。有給的話會用它校正 VL 的形近字誤讀
+    （實測料號 22SW0 被轉寫成 22SWO）。原生文字層是權威來源，VL 只補圖片與版面。
     """
     if not image_bytes_list:
         return []
@@ -712,11 +787,16 @@ def extract_text_with_vision(
         "You are a document digitization assistant. Convert this PDF page into clean GitHub-Flavored Markdown.\n\n"
         "STRICT OUTPUT RULES — output only Markdown, nothing else:\n\n"
         "1. HEADINGS — Use `##` for section titles, `###` for sub-sections. Preserve hierarchy as it appears on the page.\n\n"
-        "2. TABLES — MUST use Markdown pipe-table syntax INCLUDING the separator row. Example:\n"
+        # 範例表格曾被模型整張照抄進輸出（實測 [Unit 0]基礎課程 有 3 個 chunk
+        # 含「| 項目 | 條件A | 條件B | 100 | 200 |」，那不是投影片的內容，是這裡的範例）。
+        # 中文欄名讓它看起來像真內容，混進中文語料就分不出來。改用一眼可辨的
+        # 佔位符，並在輸出端把它濾掉（_strip_prompt_echo）——雙保險。
+        "2. TABLES — MUST use Markdown pipe-table syntax INCLUDING the separator row.\n"
+        "   Shape only (do NOT copy these placeholder words into your output):\n"
         "```\n"
-        "| 項目 | 條件A | 條件B |\n"
+        "| <col1> | <col2> | <col3> |\n"
         "| --- | --- | --- |\n"
-        "| 數值 | 100 | 200 |\n"
+        "| <cell> | <cell> | <cell> |\n"
         "```\n"
         "   Preserve column count exactly. Empty cells use a space. NEVER flatten tables into prose.\n\n"
         "3. LISTS — Use `-` for bullets and `1.` `2.` for numbered lists. Indent sub-items with 2 spaces.\n\n"
@@ -741,13 +821,17 @@ def extract_text_with_vision(
                 model=settings.OLLAMA_VISION_MODEL,
             )
             text = strip_markdown_fence_wrapper(raw.strip()) if raw else ""
+            text = _strip_prompt_echo(text)
+            n_fixed = 0
+            if text and native_texts:
+                text, n_fixed = repair_code_tokens(text, native_texts.get(page_num, ""))
             if text:
                 segments.append({
                     "page": page_num,
                     "paragraph_index": 0,
                     "text": text,
                 })
-            logger.info("VL extract page=%d text_len=%d", page_num, len(text))
+            logger.info("VL extract page=%d text_len=%d 形近字校正=%d", page_num, len(text), n_fixed)
         except Exception as exc:
             logger.warning("VL extract page=%d failed, skipping: %s", page_num, exc)
 

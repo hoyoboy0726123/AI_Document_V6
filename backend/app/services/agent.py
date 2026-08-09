@@ -901,8 +901,12 @@ def _flag_unsourced_values(answer: Optional[str], contexts: List[Dict[str, Any]]
             + "、".join(unsourced[:8]))
 
 
-_ABBREV_RE = re.compile(r"\b([A-Z]{2,5})\b")
-_ABBREV_Q_MAX_LEN = 16
+# 純字母縮寫（PR / BOM / EC）與「字母+數字」的代碼／料號（22SW0 / 08G2000174J3）。
+# 後者是實測補上的：教育訓練文件的內容主體就是料號，而「22SW0 是什麼類別」
+# 同樣被低信心閘門擋掉 —— 原字明明就在語料裡。
+_ABBREV_RE = re.compile(
+    r"\b([A-Z]{2,5}|(?=[A-Z0-9-]{4,}\b)(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)[A-Z0-9-]+)\b")
+_ABBREV_Q_MAX_LEN = 20
 
 
 def literal_abbrev_hit(question: str, evidence: List[Dict[str, Any]]) -> Optional[str]:
