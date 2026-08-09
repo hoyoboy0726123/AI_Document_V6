@@ -268,6 +268,20 @@ const QAConsolePage = () => {
   // isFollowup 決定要不要帶對話歷史。左側是「新問題」、右側才是「追問」——
   // 這兩個入口原本呼叫時參數完全相同，後端無從分辨，於是新問題也被套上
   // 主體繼承（實測問「冷凝測試」被沿用成上一輪的「濕度」）。
+  // Agent / 混合模式也要送檢索範圍。原本只有純 RAG 模式送，於是使用者在左側
+  // 鎖定了某份文件，Agent 仍然整個資料庫搜尋，答案引用完全不相干的規範 ——
+  // 介面看起來限定了範圍，實際上沒有。
+  const buildScopePayload = () => {
+    const v = form.getFieldsValue();
+    const { document_id, folder_ids } = decodeDocScope(v.doc_scope);
+    return {
+      classification_id: v.classification_id || null,
+      project_id: v.project_id || null,
+      document_id,
+      folder_ids,
+    };
+  };
+
   const runAgentStream = async (question, { isFollowup = false } = {}) => {
     setLoading(true);
     setStreaming({
@@ -286,7 +300,7 @@ const QAConsolePage = () => {
       : [];
 
     try {
-      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5 }, {
+      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5, ...buildScopePayload() }, {
         onEvent: (eventName, data) => {
           setStreaming((prev) => prev ? {
             ...prev,
@@ -345,7 +359,7 @@ const QAConsolePage = () => {
       ? conversationHistory.map((m) => ({ question: m.question, answer: m.answer }))
       : [];
     try {
-      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5 }, {
+      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5, ...buildScopePayload() }, {
         onEvent: (eventName, data) => {
           if (eventName === "route") {
             // rag 子模式不需要顯示「推理過程」面板

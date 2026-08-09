@@ -48,8 +48,12 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "embedding failed"}
 
     # 與 /rag/query 共用同一條檢索（services.retrieval，檢索邏輯的唯一實作）。
-    # Agent 為全域搜尋，不做 document/分類過濾。
-    selected = retrieval.hybrid_retrieve(db, query, embeddings[0], top_k)
+    # 檢索範圍取自本次請求（db.info）——原本這裡寫死「Agent 為全域搜尋」，
+    # 於是使用者在介面上鎖定了某份文件，Agent 仍然整個資料庫亂查，
+    # 答案引用完全不相干的規範。介面提供了選擇器就必須遵守它。
+    from .agent import get_retrieval_scope  # 延遲載入避免循環匯入
+    scope = get_retrieval_scope(db)
+    selected = retrieval.hybrid_retrieve(db, query, embeddings[0], top_k, **scope)
     if not selected:
         return {"results": []}
 

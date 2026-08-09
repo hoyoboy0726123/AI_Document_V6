@@ -657,3 +657,10 @@ class AgentChatRequest(BaseModel):
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
     max_steps: int = Field(default=8, ge=1, le=15)
     top_k: int = Field(default=5, ge=1, le=10)
+    # 檢索範圍。原本這四個欄位只有 RAGQueryRequest 有，Agent 與混合模式收不到，
+    # 於是使用者在左側鎖定了某份文件，答案卻引用完全不相干的其他規範 ——
+    # 介面看起來限定了範圍，實際上整個資料庫都在查。
+    classification_id: Optional[str] = None
+    project_id: Optional[str] = None
+    document_id: Optional[str] = None
+    folder_ids: Optional[List[str]] = None

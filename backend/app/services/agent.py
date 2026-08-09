@@ -1508,6 +1508,37 @@ def _structural_evidence(db: Session, question: str, conversation_history) -> Op
     return {"rag_evidence": rag_evidence, "kg_notes": kg_notes, "matched": matched}
 
 
+_SCOPE_KEY = "rag_scope"
+
+
+def set_retrieval_scope(db: Session, **filters) -> None:
+    """設定這次請求的檢索範圍（文件／資料夾／分類／專案）。
+
+    放在 db.info 而不是參數穿透，也不是 ContextVar：
+      * 參數穿透要改 17 個呼叫點（6 個 seed + 11 個 run_tool），而 LLM 會動態
+        挑工具，任何一個都可能是 rag_search —— 漏一個就是「有時遵守、有時不遵守」，
+        比完全不支援更難察覺。
+      * ContextVar 在 SSE 串流下會失效（Starlette 的 iterate_in_threadpool 每次
+        next() 都 copy_context()，第一次 yield 之後就讀不到，今天已實測過）。
+      * db.info 是 SQLAlchemy 給 session 用的字典，而每個請求各自 SessionLocal()，
+        天然就是請求範圍，也不受 yield 影響。
+    """
+    scope = {k: v for k, v in filters.items() if v}
+    if scope:
+        db.info[_SCOPE_KEY] = scope
+        logger.info("檢索範圍限定：%s", scope)
+    else:
+        db.info.pop(_SCOPE_KEY, None)
+
+
+def get_retrieval_scope(db: Session) -> Dict[str, Any]:
+    """取回本次請求的檢索範圍；沒設定就是全域搜尋。"""
+    try:
+        return dict(db.info.get(_SCOPE_KEY) or {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
     """用「使用者原始問題」跑與 /rag/query 完全相同的檢索，回傳 (evidence, confidence)。
 
@@ -1525,21 +1556,25 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
     # 其中一份主導：實測「810H 的溫度量測公差與 331D 的…各是多少」候選池
     # 10 塊裡 9 塊來自 810H、0 塊來自 331D，於是系統回「查無相關資料」——
     # 它其實只查了一份，另一份根本沒進候選池，rerank 再強也救不回來。
+    scope = get_retrieval_scope(db)
     stripped_q, spec_docs = retrieval.resolve_spec_docs(db, question)
-    if len(spec_docs) >= 2:
+    # 使用者已經明確鎖定文件時，不再做「比較題分頭檢索」——那會跨出鎖定範圍，
+    # 正是使用者要避免的事。鎖定優先於問句裡提到的規範編號。
+    if len(spec_docs) >= 2 and not scope.get("document_id"):
         per_doc = max(2, top_k // len(spec_docs))
         emb2 = ai.embed_query(stripped_q) or embeddings
         filtered = []
         for did in spec_docs:
             try:
                 filtered.extend(retrieval.hybrid_retrieve(
-                    db, stripped_q, emb2[0], per_doc, document_id=did))
+                    db, stripped_q, emb2[0], per_doc,
+                    **{**scope, "document_id": did}))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("比較題分頭檢索失敗 doc=%s: %s", did[:8], exc)
         logger.info("比較題分頭檢索：%d 份規範，各取 %d 塊，共 %d 塊",
                     len(spec_docs), per_doc, len(filtered))
     else:
-        filtered = retrieval.hybrid_retrieve(db, question, embeddings[0], top_k)
+        filtered = retrieval.hybrid_retrieve(db, question, embeddings[0], top_k, **scope)
     if not filtered:
         return [], None
     confidence = rerank.top_relevance(question, [c for c, _ in filtered])

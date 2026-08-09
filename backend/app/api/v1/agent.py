@@ -48,6 +48,15 @@ def agent_chat(
     def event_stream():
         db = SessionLocal()
         try:
+            # 檢索範圍必須在任何檢索之前設定。原本 Agent 模式完全忽略前端的
+            # 文件／資料夾選擇，使用者鎖定了某份文件仍會撈到別的規範。
+            agent.set_retrieval_scope(
+                db,
+                document_id=payload.document_id,
+                folder_ids=payload.folder_ids,
+                classification_id=payload.classification_id,
+                project_id=payload.project_id,
+            )
             final_text = ""
             final_sources = []
             for evt in agent.run_agent(
@@ -131,6 +140,13 @@ def agent_route(
     def event_stream():
         db = SessionLocal()
         try:
+            agent.set_retrieval_scope(
+                db,
+                document_id=payload.document_id,
+                folder_ids=payload.folder_ids,
+                classification_id=payload.classification_id,
+                project_id=payload.project_id,
+            )
             yield _sse("route", {"mode": mode})
             final_text, final_sources = "", []
             if mode == "agent":
