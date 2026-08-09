@@ -235,22 +235,29 @@ def main() -> None:
         for p in ranked_low:
             print(f"    {p['id']} {p['q'][:34]}")
 
+    gen_by_id = {}
     if args.with_generation:
         from app.services.agent import has_values  # noqa: PLC0415
         print()
         print("生成層（需呼叫 LLM，較慢）")
         grounded = hallucinated = 0
         t1 = time.perf_counter()
+        # 逐題記錄生成結果。只看總分不夠：19/30 兩次都是 19，可能是不同的 19 ——
+        # 「一題變好、一題變壞」在總分上完全看不出來，而那正是回歸最危險的形態。
+        gen_by_id = {}
         for it in val_items:
             ans, _src = retrieval_answer(db, it["q"])
             ok = gold_hit(it["gold"], ans)
+            gen_by_id[it["id"]] = bool(ok)
             grounded += int(ok)
         for it in none_items:
             ans, _src = retrieval_answer(db, it["q"])
             # 語料內不存在的題目，答案不該出現任何帶單位的數值
             # 幻覺 = 「沒有誠實說查不到」且「給出了帶單位的數值」。
             # 少了前半個條件，兜底訊息裡引用的原文數字會被誤判成編造。
-            hallucinated += int(not is_honest_no_answer(ans) and has_values(ans))
+            _h = not is_honest_no_answer(ans) and has_values(ans)
+            gen_by_id[it["id"]] = not _h        # none 題：True = 正確拒答
+            hallucinated += int(_h)
         result["value_grounding_rate"] = round(grounded / n, 3) if n else 0
         result["hallucination_rate"] = round(hallucinated / len(none_items), 3) if none_items else 0
         result["generation_seconds"] = round(time.perf_counter() - t1, 1)
@@ -274,7 +281,12 @@ def main() -> None:
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
-            json.dump({**result, "per_question": per_q}, f, ensure_ascii=False, indent=2)
+            for _p in per_q:
+                if _p["id"] in gen_by_id:
+                    _p["gen_ok"] = gen_by_id[_p["id"]]
+            _extra = [{"id": k, "gen_ok": v} for k, v in gen_by_id.items()
+                      if k not in {p["id"] for p in per_q}]
+            json.dump({**result, "per_question": per_q + _extra}, f, ensure_ascii=False, indent=2)
         print(f"結果已寫入 {args.out}")
 
     db.close()
