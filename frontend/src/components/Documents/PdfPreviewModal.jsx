@@ -49,15 +49,17 @@ const PdfPreviewModal = ({
   const streamControllerRef = useRef(null);
   const analysisScrollRef = useRef(null); // AI 分析對話捲動容器
 
-  // 分析面板開啟或有新內容時，自動捲到最下方（顯示最新一次查詢/正在生成的結果），
-  // 而不是停在最上方的舊紀錄。
+  // 有新內容時捲到最下方（顯示正在生成的結果）。
+  //
+  // 但「使用者自己按開分析紀錄」不該捲到底：那是回頭翻舊資料，應該從最上面看起。
+  // 用 analyzing 區分兩種情境 —— 面板現在預設收合，展開多半就是為了看舊紀錄。
   useEffect(() => {
-    if (!showAnalysis) return undefined;
+    if (!showAnalysis || !analyzing) return undefined;
     const el = analysisScrollRef.current;
     if (!el) return undefined;
     const t = setTimeout(() => { el.scrollTop = el.scrollHeight; }, 80);
     return () => clearTimeout(t);
-  }, [conversationHistory, showAnalysis]);
+  }, [conversationHistory, showAnalysis, analyzing]);
 
   useEffect(() => {
     apiClient.get("/rag/config")
@@ -101,7 +103,9 @@ const PdfPreviewModal = ({
       const res = await apiClient.get(`/documents/${documentId}/analysis`);
       const history = res.data?.messages ?? [];
       setConversationHistory(history);
-      if (history.length > 0) setShowAnalysis(true);
+      // 刻意不自動展開分析面板。原本只要有舊紀錄就展開，一進預覽整個右半邊
+      // 就被上次的分析佔滿 —— 但打開 PDF 預覽時多半是要看文件、做新的查詢，
+      // 舊紀錄不是當下要讀的東西。需要時按「分析紀錄」自己開。
     } catch (err) {
       console.error("Failed to fetch history", err);
       setConversationHistory([]);
@@ -640,10 +644,18 @@ const PdfPreviewModal = ({
               >
                 多頁分析
               </Button>
-              {showAnalysis && (
+              {/* 面板收合時必須留一個入口，否則使用者會以為舊紀錄不見了。
+                  帶上筆數，讓人一眼知道有沒有東西可看。 */}
+              {showAnalysis ? (
                 <Button icon={<EyeOutlined />} onClick={() => setShowAnalysis(false)}>
                   隱藏分析面板
                 </Button>
+              ) : (
+                conversationHistory.length > 0 && (
+                  <Button icon={<RobotOutlined />} onClick={() => setShowAnalysis(true)}>
+                    分析紀錄（{conversationHistory.length}）
+                  </Button>
+                )
               )}
               <Divider type="vertical" />
               <Input.Search
