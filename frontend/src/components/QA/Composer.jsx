@@ -1,7 +1,6 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useState } from "react";
 import { Button, Input, Tag, Tooltip } from "antd";
 import { SendOutlined, StopOutlined, SettingOutlined } from "@ant-design/icons";
-import apiClient from "../../services/api";
 
 const { TextArea } = Input;
 
@@ -26,55 +25,14 @@ const Composer = memo(function Composer({
   onOpenSettings,
   scopeLabel,
   hasHistory,
-  historyForCheck,
 }) {
   const [value, setValue] = useState("");
-  const [check, setCheck] = useState(null);   // { is_followup, inherited, reason }
-  // null = 照系統判斷；"followup" / "new" = 使用者手動指定。
-  // 必須是三態而不是布林：系統也可能把追問誤判成新問題
-  //（實測「冷凝測試方法與條件」），那時要能反向強制延續。
-  const [override, setOverride] = useState(null);
-  const timerRef = useRef(null);
-  const seqRef = useRef(0);
-
-  // 打字時去抖動查詢判斷結果。300ms 是「停下來想一下」的長度，
-  // 比這短會在連續輸入時打出一堆無用請求。
-  useEffect(() => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    const text = value.trim();
-    if (!text || !hasHistory) { setCheck(null); return; }
-    timerRef.current = setTimeout(async () => {
-      const seq = ++seqRef.current;
-      try {
-        const res = await apiClient.post("rag/followup-check", {
-          question: text,
-          conversation_history: historyForCheck,
-        });
-        // 慢回的舊請求不可以蓋掉新結果
-        if (seq === seqRef.current) setCheck(res.data);
-      } catch { /* 判斷失敗就不顯示標籤，不影響送出 */ }
-    }, 300);
-    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [value, hasHistory, historyForCheck]);
-
-  // 送出時實際採用的判定：使用者指定優先，否則照系統判斷。
-  const effectiveFollowup = override
-    ? override === "followup"
-    : Boolean(check?.is_followup);
-
   const submit = useCallback(() => {
     const text = value.trim();
     if (!text || loading) return;
-    onSubmit(text, { isFollowup: effectiveFollowup });
+    onSubmit(text);
     setValue("");
-    setCheck(null);
-    setOverride(null);
-  }, [value, loading, effectiveFollowup, onSubmit]);
-
-  // 有歷史且已經打了字就一定要顯示狀態。原本只在判定為「延續」時顯示，
-  // 判定為「新問題」是靜默的 —— 但靜默有歧義：使用者分不出
-  // 「系統判斷是新問題」和「系統根本沒判斷」。
-  const showState = hasHistory && value.trim() && check;
+  }, [value, loading, onSubmit]);
 
   return (
     <div className="composer">
@@ -100,31 +58,6 @@ const Composer = memo(function Composer({
             範圍：{scopeLabel}
           </Tag>
         )}
-        {showState && (
-          <Tooltip
-            title={
-              <span>
-                {override ? "你手動指定的" : check.reason}
-                <br />
-                點一下切換成「{effectiveFollowup ? "獨立的新問題" : `延續：${check.inherited || "上一題"}`}」
-              </span>
-            }
-          >
-            <Tag
-              className="composer-tag composer-state"
-              color={effectiveFollowup ? "orange" : "default"}
-              bordered={false}
-              // 兩種狀態都可以點著切換。單向的「✕ 取消延續」不夠 ——
-              // 系統把追問誤判成新問題時，使用者同樣需要能改回來。
-              onClick={() => setOverride(effectiveFollowup ? "new" : "followup")}
-            >
-              {effectiveFollowup
-                ? `延續：${check.inherited || "上一題"}`
-                : "新問題"}
-              {override && " ·  已手動指定"}
-            </Tag>
-          </Tooltip>
-        )}
         <span className="composer-spacer" />
         <Tooltip title="查詢設定">
           <Button size="small" type="text" icon={<SettingOutlined />} onClick={onOpenSettings} />
@@ -134,12 +67,7 @@ const Composer = memo(function Composer({
       <div className="composer-box">
         <TextArea
           value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            // 問題改了，先前的手動指定就不該繼續套用 —— 使用者可能已經
-            // 把「那濕度呢」改成一個完整的新問題了。
-            if (override) setOverride(null);
-          }}
+          onChange={(e) => setValue(e.target.value)}
           placeholder={hasHistory ? "接著問，或直接問新問題…" : "輸入問題…"}
           autoSize={{ minRows: 1, maxRows: 8 }}
           variant="borderless"
@@ -167,7 +95,7 @@ const Composer = memo(function Composer({
       <div className="composer-hint">
         Enter 送出 · Shift+Enter 換行
         {hasHistory
-          ? " · 系統會自動判斷這是追問還是新問題，點標籤可改"
+          ? " · 承接前文時系統會自動補上主體，想重新開始請按「＋ 新對話」"
           : " · 這是本對話的第一題"}
       </div>
     </div>

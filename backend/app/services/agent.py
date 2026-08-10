@@ -309,14 +309,23 @@ _GENERIC_PREFIX = {
 }
 
 
+# 「X測試」的 X 若含這些字，切出來的多半是詞的碎片而不是測試名 ——
+# 實測「詳細的測試條件」被切出「細的」，並被當成主體沿用到下一輪，
+# 介面上就顯示「沿用上一輪的『細的』」，使用者完全看不懂。
+# 同樣的正則在答案裡還撈到「入到」「定的」「錄預」這類碎片。
+_SUBJECT_FRAGMENT_RE = re.compile(r"[的了得地之及與和或再更很最不是有在做]")
+
+
 def _find_subject(text: str) -> Optional[str]:
     """取出文字中的查詢對象（規範編號／方法號／測試類型），找不到回 None。"""
     m = _SUBJECT_RE.search(text or "")
     if m:
         return m.group(0)
     for m in _XTEST_RE.finditer(text or ""):
-        if m.group(1) not in _GENERIC_PREFIX:
-            return m.group(1)
+        cand = m.group(1)
+        if cand in _GENERIC_PREFIX or _SUBJECT_FRAGMENT_RE.search(cand):
+            continue
+        return cand
     return None
 
 
@@ -400,47 +409,57 @@ def resolve_followup_question(question: str,
     return rewritten
 
 
-def classify_followup(question: str,
-                      conversation_history: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    """判斷這句是「延續上一輪」還是「新問題」，供前端在送出前顯示可覆蓋的標籤。
+_SELF_CONTAINED_RE = re.compile(
+    r"MIL-|ISO\s|IEC\s|IEEE\s|ASTM\s|METHOD\s*\d{3}|方法\s*\d{3}|\d{3}\.\d", re.I)
 
-    刻意是純規則、不呼叫 LLM：這個結果要隨打字即時更新，
-    交給 Agent 判斷會在使用者還沒按送出之前就花 1–8 秒。
 
-    回傳 {is_followup, inherited, rewritten, reason}。
-    reason 是給介面顯示用的短句 —— 使用者要能看懂「為什麼系統這樣判斷」，
-    才有辦法決定要不要按掉那個標籤。
+def resolve_query(question: str,
+                  conversation_history: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """把使用者這一句改寫成「能獨立理解」的檢索查詢。所有查詢路徑的單一入口。
 
-    這裡只做判斷，實際改寫仍由 resolve_followup_question 在檢索前執行，
-    兩者共用同一組條件，不會出現「標籤說延續、實際沒延續」的落差。
+    為什麼是「無條件改寫」而不是「先分類再決定要不要改寫」：
+    分類一定要有門檻，而門檻一定會錯。實測「溫度有確切的數值嗎 你提供的是允許
+    公差」超過 18 字被判成新問題，但使用者實際是在追問 —— 使用者因此必須理解
+    這個機制、還要手動切換標籤，那是把系統的內部狀態外包給使用者。
+
+    ChatGPT 沒有這個問題，是因為它不做檢索：整串歷史直接餵給模型，由模型自己
+    解析指代，而「新問題」是使用者按 New chat 的明確動作。我們要做向量檢索，
+    查詢字串必須自帶語意（「那濕度呢」嵌入後撈不到東西），所以必須改寫 ——
+    但改寫可以無條件做：本來就完整的問題，改寫器會原樣回傳。
+
+    分層：
+      1. 沒有歷史 → 原樣（第一題無可延續）
+      2. 問句已自帶規範編號／方法號 → 原樣（快速路徑，省一次 LLM 呼叫）
+      3. 其餘 → LLM 改寫；失敗或逾時則退回規則式的 resolve_followup_question
+
+    規則式保留為備援而非並行機制 —— LLM 呼叫會失敗，那時仍要有東西可用。
     """
     q = (question or "").strip()
-    if not q:
-        return {"is_followup": False, "inherited": None, "rewritten": q, "reason": ""}
+    if not q or not conversation_history:
+        return {"query": q, "rewritten": False, "source": "none"}
 
-    inherited = _history_subject(conversation_history)
-    if not inherited:
-        return {"is_followup": False, "inherited": None, "rewritten": q,
-                "reason": "沒有可延續的上一輪主體"}
+    if _SELF_CONTAINED_RE.search(q):
+        return {"query": q, "rewritten": False, "source": "self_contained"}
 
-    rewritten = resolve_followup_question(q, conversation_history)
-    if rewritten != q:
-        subj = _find_subject(q)
-        reason = (f"「{subj}」是參數名不是測試名，沿用上一輪的「{inherited}」"
-                  if subj else f"問句未指名測試，沿用上一輪的「{inherited}」")
-        return {"is_followup": True, "inherited": inherited,
-                "rewritten": rewritten, "reason": reason}
+    try:
+        intent = ai.analyze_followup_intent(q, list(conversation_history)[-3:])
+        opt = (intent.get("optimized_query") or "").strip()
+        if opt and opt != q:
+            # 語言一致性守衛：改寫器偶爾會把中文問題整句翻成英文（或反之）。
+            # 語料是英文、使用者問中文，換掉語言等於換掉整個檢索行為 ——
+            # 這種改寫寧可不要。原本這道守衛只在 rag.py 有，agent 路徑沒有。
+            cn = lambda t: bool(re.search(r"[一-鿿]", t))  # noqa: E731
+            if cn(q) != cn(opt):
+                logger.info("改寫結果語言不一致，維持原問句：「%s」→「%s」", q[:30], opt[:30])
+                return {"query": q, "rewritten": False, "source": "llm_rejected"}
+            logger.info("查詢改寫（LLM）：「%s」→「%s」", q[:40], opt[:60])
+            return {"query": opt, "rewritten": True, "source": "llm"}
+        return {"query": q, "rewritten": False, "source": "llm"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM 查詢改寫失敗，退回規則式：%s", exc)
 
-    subj = _find_subject(q)
-    if subj and subj != inherited:
-        return {"is_followup": False, "inherited": inherited, "rewritten": q,
-                "reason": f"問句自己指名了「{subj}」，視為新問題"}
-    if len(q) > _FOLLOWUP_MAX_LEN:
-        return {"is_followup": False, "inherited": inherited, "rewritten": q,
-                "reason": "問句完整，視為新問題"}
-    # 短、無新主體、也沒被改寫（例如已自帶同一個主體）→ 仍屬延續
-    return {"is_followup": True, "inherited": inherited, "rewritten": q,
-            "reason": f"延續上一輪的「{inherited}」"}
+    fallback = resolve_followup_question(q, conversation_history)
+    return {"query": fallback, "rewritten": fallback != q, "source": "rule"}
 
 
 def _clarify_scope_text(db: Session, question: str) -> str:
@@ -1253,11 +1272,10 @@ def route_mode(question: str) -> str:
 def run_rag_only(db: Session, question: str,
                  conversation_history: Optional[List[Dict[str, Any]]] = None):
     """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。"""
-    # 追問補主體。Agent 路徑早就有這道處理，這條分支沒有 —— 於是承接
-    # 「鹽霧測試的箱體溫度」之後問「那濕度呢」，會撈回濕度測試的內容；
-    # 問「這個測試要跑多久」會撈回振動測試的 20 小時飛行時間。
-    # 混合模式路由到 RAG 分支是使用者最常走的路，這個漏洞影響面比 Agent 大。
-    question = resolve_followup_question(question, conversation_history)
+    # 查詢改寫（單一入口）。承接「鹽霧測試的箱體溫度」之後問「那濕度呢」，
+    # 沒有改寫就會撈回濕度測試的內容。
+    _resolved = resolve_query(question, conversation_history)
+    question = _resolved["query"]
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
 
     subject_caution = ""
@@ -1778,10 +1796,12 @@ def run_agent(
     #   (b) 走結構工具列出 30 個方法後提早 return，耗掉 9-14 步才給一份清單
     # 兩者都不如一開始就問清楚，而且省下整輪模型呼叫。
     # 對話歷史已指明對象時（例如上一輪在談振動測試）視為有主體，不重複反問。
-    # 先做「參數型追問」的補主體（「那濕度呢」這種白名單誤判成有主體的情況）。
-    # 底下原有的分支只處理「完全沒有主體」，而且要求 _wants_values —— 實測
-    # 「這個測試要跑多久」兩個條件都不成立，於是整段跳過。
-    question = resolve_followup_question(question, conversation_history)
+    # 查詢改寫（與 run_rag_only 共用同一個入口）。
+    _resolved = resolve_query(question, conversation_history)
+    if _resolved["rewritten"]:
+        yield {"type": "thought", "step": 0,
+               "text": f"承接前文，改以「{_resolved['query']}」查詢"}
+    question = _resolved["query"]
 
     if _lacks_subject(question) and _wants_values(question):
         inherited = _history_subject(conversation_history)

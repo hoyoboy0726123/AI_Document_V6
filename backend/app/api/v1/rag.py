@@ -566,22 +566,6 @@ def get_rag_config(current_user=Depends(get_current_user)):
 # 讓尚未改版的前端不會壞掉；新前端改用底下的 /conversations。
 
 
-@router.post("/followup-check")
-def followup_check(
-    payload: dict,
-    current_user=Depends(get_current_user),
-):
-    """判斷這句是延續還是新問題。純規則、不呼叫 LLM，供前端隨打字即時顯示。
-
-    為什麼放在後端而不是前端自己判斷：規則本體（主體白名單、參數名、
-    長度門檻、改寫方式）都在 services/agent.py。前端重寫一份必然會漂移，
-    然後出現「標籤說會延續、實際檢索沒延續」這種最難查的落差。
-    """
-    question = (payload or {}).get("question") or ""
-    history = (payload or {}).get("conversation_history") or []
-    return agent.classify_followup(question, history)
-
-
 @router.get("/conversations")
 def list_conversations(
     db: Session = Depends(get_db),

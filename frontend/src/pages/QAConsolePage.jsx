@@ -567,8 +567,11 @@ const QAConsolePage = () => {
   // 但也不能用 useCallback([]) 直接包 —— 那會鎖住第一次 render 的閉包，
   // loading 與 qaMode 都變成過期值，切換模式後送出還是走舊模式。
   const submitRef = useRef(null);
-  const handleComposerSubmit = useCallback((question, opts) => {
-    return submitRef.current?.(question, opts?.isFollowup ?? true);
+  const handleComposerSubmit = useCallback((question) => {
+    // 一律當作「同一條對話的延續」送出：完整歷史交給後端，由 resolve_query
+    // 決定要不要改寫。前端不再自己判斷 —— 分類有門檻、門檻會錯，
+    // 而使用者不該為了問問題去理解這個機制。開新主題請按「＋ 新對話」。
+    return submitRef.current?.(question, true);
   }, []);
 
 
@@ -738,13 +741,6 @@ const QAConsolePage = () => {
     [conversations, activeConvId],
   );
 
-  // 判斷用的歷史只取最近兩輪：後端的 _history_subject 也只看最後三筆，
-  // 送整包只是讓每次打字都傳一大包 JSON。
-  const historyForCheck = useMemo(
-    () => conversationHistory.slice(-2).map((m) => ({ question: m.question, answer: m.answer })),
-    [conversationHistory],
-  );
-
   // 目前鎖定的檢索範圍，顯示在輸入框上方 —— 範圍看不見就會重演
   // 「以為限定了、其實整個資料庫都在查」那個問題。
   const scopeLabel = useMemo(() => {
@@ -894,7 +890,6 @@ const QAConsolePage = () => {
               onOpenSettings={() => setSettingsOpen(true)}
               scopeLabel={scopeLabel}
               hasHistory={conversationHistory.length > 0}
-              historyForCheck={historyForCheck}
             />
           </Card>
         </Col>

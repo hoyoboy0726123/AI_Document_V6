@@ -1,0 +1,272 @@
+{
+  "n_value_questions": 30,
+  "recall@20": 0.9,
+  "hit@5": 0.733,
+  "mrr": 0.554,
+  "retrieval_seconds": 340.4,
+  "value_grounding_rate": 0.633,
+  "hallucination_rate": 0.0,
+  "generation_seconds": 1545.2,
+  "per_question": [
+    {
+      "id": "v01",
+      "q": "沙塵測試的塵土濃度是多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 4,
+      "gen_ok": true
+    },
+    {
+      "id": "v02",
+      "q": "鹽霧測試的箱體溫度要維持在幾度",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v03",
+      "q": "黴菌測試量測濕球溫度時，通過濕球的風速至少要多少",
+      "recall": true,
+      "rank": 5,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v04",
+      "q": "淋雨測試建議的最小降雨強度是多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v05",
+      "q": "標準大氣條件下的溫度與相對濕度是多少",
+      "recall": true,
+      "rank": 3,
+      "n_gold_chunks": 1,
+      "gen_ok": false
+    },
+    {
+      "id": "v06",
+      "q": "受控環境條件下的溫度與相對濕度規定是什麼",
+      "recall": true,
+      "rank": 3,
+      "n_gold_chunks": 6,
+      "gen_ok": true
+    },
+    {
+      "id": "v07",
+      "q": "測試時的壓力量測公差是多少",
+      "recall": true,
+      "rank": 0,
+      "n_gold_chunks": 2,
+      "gen_ok": false
+    },
+    {
+      "id": "v08",
+      "q": "軍用運輸機全動力起飛時的平均高度變化率是多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v09",
+      "q": "濕度測試建議的持續天數對應到第幾百分位",
+      "recall": true,
+      "rank": 2,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v10",
+      "q": "MIL-STD-810H 沙塵測試的塵土濃度是多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 4,
+      "gen_ok": true
+    },
+    {
+      "id": "v11",
+      "q": "MIL-STD-810H 鹽霧測試的箱體溫度是多少",
+      "recall": true,
+      "rank": 2,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v12",
+      "q": "引信衝擊測試的落錘高度是多少",
+      "recall": false,
+      "rank": 0,
+      "n_gold_chunks": 2,
+      "gen_ok": false
+    },
+    {
+      "id": "v13",
+      "q": "引信測試的等效試驗負載重量是多少",
+      "recall": true,
+      "rank": 0,
+      "n_gold_chunks": 2,
+      "gen_ok": false
+    },
+    {
+      "id": "v14",
+      "q": "正弦運動控制的頻率準確度要求是多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 2,
+      "gen_ok": true
+    },
+    {
+      "id": "v15",
+      "q": "引信測試的溫度量測公差是多少",
+      "recall": true,
+      "rank": 0,
+      "n_gold_chunks": 1,
+      "gen_ok": false
+    },
+    {
+      "id": "v16",
+      "q": "清潔劑的標準檢驗溫度條件是多少",
+      "recall": true,
+      "rank": 4,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v17",
+      "q": "清潔化合物要倒入多大的耐壓玻璃瓶",
+      "recall": true,
+      "rank": 2,
+      "n_gold_chunks": 4,
+      "gen_ok": false
+    },
+    {
+      "id": "v18",
+      "q": "非揮發性物質測定時烘箱要維持幾度",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 2,
+      "gen_ok": true
+    },
+    {
+      "id": "v19",
+      "q": "硬水儲備溶液需要溶解多少醋酸鈣",
+      "recall": true,
+      "rank": 2,
+      "n_gold_chunks": 1,
+      "gen_ok": false
+    },
+    {
+      "id": "v20",
+      "q": "油耗測試時進口燃油溫度要維持在幾度",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v21",
+      "q": "油耗測試的水套出口溫度要維持在幾度",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v22",
+      "q": "Falex 試驗前夾具要冷卻到什麼室溫",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v23",
+      "q": "潤滑劑的磨損防止特性平均磨痕直徑上限是多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 5,
+      "gen_ok": true
+    },
+    {
+      "id": "v24",
+      "q": "低溫極值搭配的相對濕度假設是多少度",
+      "recall": true,
+      "rank": 2,
+      "n_gold_chunks": 2,
+      "gen_ok": true
+    },
+    {
+      "id": "v25",
+      "q": "低溫極值搭配 90% 相對濕度時，60 年一遇的霜點是多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 11,
+      "gen_ok": false
+    },
+    {
+      "id": "v26",
+      "q": "可靠度測試的溫度變化率是每分鐘幾度",
+      "recall": false,
+      "rank": 0,
+      "n_gold_chunks": 1,
+      "gen_ok": false
+    },
+    {
+      "id": "v27",
+      "q": "可靠度測試選定的中間溫度層級是幾度",
+      "recall": false,
+      "rank": 0,
+      "n_gold_chunks": 2,
+      "gen_ok": false
+    },
+    {
+      "id": "v28",
+      "q": "機翼掛載的加速度需求是多少 g",
+      "recall": true,
+      "rank": 0,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v29",
+      "q": "引擎在額定轉速滿油門時，進氣限制與排氣限制要設定為多少",
+      "recall": true,
+      "rank": 1,
+      "n_gold_chunks": 1,
+      "gen_ok": true
+    },
+    {
+      "id": "v30",
+      "q": "WC 844 推進劑點燃後，測試板不得出現多大的損傷",
+      "recall": true,
+      "rank": 0,
+      "n_gold_chunks": 1,
+      "gen_ok": false
+    },
+    {
+      "id": "n01",
+      "gen_ok": true
+    },
+    {
+      "id": "n02",
+      "gen_ok": true
+    },
+    {
+      "id": "n03",
+      "gen_ok": true
+    },
+    {
+      "id": "n04",
+      "gen_ok": true
+    },
+    {
+      "id": "n05",
+      "gen_ok": true
+    }
+  ]
+}
