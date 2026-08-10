@@ -309,6 +309,8 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate            # Windows CMD
 pip install -r requirements.txt   # 或 uv sync（若用 uv）
+                                  # 含 opencc-python-reimplemented：
+                                  # 答案的簡體→台灣正體轉換（Apache 2.0）
 
 copy .env_example .env            # 然後編輯 .env（見下方）
 alembic upgrade head              # 套用資料庫遷移

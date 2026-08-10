@@ -65,13 +65,29 @@ check("段落數少於 3 不處理", dedupe_sections("### A\nx\n\n### A\nx\n") =
 check("短文字不處理", dedupe_sections("很短的答案") == "很短的答案")
 check("空輸入安全", dedupe_sections("") == "" and dedupe_sections(None) is None)
 
-# ── 簡體轉正體 ──────────────────────────────────────────
+# ── 簡體轉正體（OpenCC s2tw）──────────────────────────────
 check("摆 → 擺", to_traditional("摆錘衝擊測試") == "擺錘衝擊測試")
 check("多字轉換", to_traditional("这个设备的数据") == "這個設備的數據")
+check("內建表涵蓋不到的高頻字也要轉",
+      to_traditional("测试该范围为负值并请参阅图表") == "測試該範圍為負值並請參閱圖表",
+      f"→ {to_traditional('测试该范围为负值并请参阅图表')}")
 check("正體字不動", to_traditional("環境數量報告項目準則") == "環境數量報告項目準則")
 check("英文與數字不動", to_traditional("MIL-STD-810H 35 ±1 ºC") == "MIL-STD-810H 35 ±1 ºC")
-check("兩邊都用的字不轉（后/里/干/准/面）",
-      to_traditional("后里干准面") == "后里干准面")
+
+# 一對多消歧：單字表做不到，這是換成 OpenCC 的主要理由
+check("一對多：干 依上下文", to_traditional("干燥箱与干扰源") == "乾燥箱與干擾源",
+      f"→ {to_traditional('干燥箱与干扰源')}")
+check("一對多：发 依上下文", to_traditional("发生故障与头发") == "發生故障與頭髮",
+      f"→ {to_traditional('发生故障与头发')}")
+
+# 不可做詞彙替換：s2twp 會把測試術語改掉，必須確認我們沒用到它
+check("測試程序不可變成「程式」", "程序" in to_traditional("测试程序和冲击条件"),
+      f"→ {to_traditional('测试程序和冲击条件')}")
+check("參數不可變成「引數」", "參數" in to_traditional("详细参数说明"),
+      f"→ {to_traditional('详细参数说明')}")
+check("濕度用「濕」不用「溼」", to_traditional("湿度应保持稳定") == "濕度應保持穩定",
+      f"→ {to_traditional('湿度应保持稳定')}")
+
 check("空輸入安全", to_traditional("") == "" and to_traditional(None) is None)
 
 print()

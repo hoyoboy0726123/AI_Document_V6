@@ -14,6 +14,14 @@ datas = [
     (os.path.join(backend_path, '.env_example'), '.'), # 提供 .env 範本
 ]
 
+# OpenCC 的轉換字典是資料檔，不是 Python 模組 —— 只加 hiddenimports 不夠，
+# 漏了它凍結版會靜默退回內建的 90 字對照表（不會 crash，但簡繁轉換幾乎失效）。
+try:
+    from PyInstaller.utils.hooks import collect_data_files
+    datas += collect_data_files('opencc')
+except Exception:
+    pass
+
 # 2. 隱藏導入 (針對 FastAPI, Uvicorn, SQLAlchemy 等)
 # 註：RAG rerank 的 cross-encoder 需要 torch + sentence-transformers + transformers。
 # 若要在 .exe 內啟用 cross-encoder，需另外 collect_all('sentence_transformers')/
@@ -36,6 +44,7 @@ hiddenimports = [
     'email.mime.text', 
     'email.mime.multipart', 
     'email.mime.application',
+    'opencc',
     'app.main',
     'app.models',
     'app.database',

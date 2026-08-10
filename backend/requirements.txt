@@ -20,3 +20,5 @@ Pillow
 slowapi
 paddleocr
 paddlepaddle
+# 簡體→台灣正體（Apache 2.0；不用 GPLv2+ 的 zhconv）
+opencc-python-reimplemented

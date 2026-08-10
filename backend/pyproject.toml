@@ -24,6 +24,10 @@ dependencies = [
   "pymupdf",
   "Pillow",
   "slowapi",
+  # 簡體→台灣正體。提示詞的「嚴禁簡體」實測會被忽略，改用確定性轉換。
+  # 選 opencc-python-reimplemented（Apache 2.0）而非 zhconv（GPLv2+）：
+  # 本專案會打包成 .exe 散布，GPL 的傳染性會波及整個作品。
+  "opencc-python-reimplemented",
   # PaddleOCR / PaddlePaddle 版本鎖：
   # paddlepaddle 3.3.x 在 Windows CPU 上 PIR + onednn 新執行器有 regression
   # (ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<...>])，

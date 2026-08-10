@@ -165,9 +165,17 @@ def _squelch_repetition(text: str) -> str:
 # 有 1 則混進簡體（「摆錘」的「摆」，而同一則的內文又寫對成「擺」）。
 # 比例低但無法預測，且使用者拿這些字去查料號／規範會查不到。
 #
-# 刻意只收「正體書寫不會用到的簡體形」，排除 后／里／干／准／面 這類兩邊都有的字 ——
-# 無差別轉換會把正確的正體字改壞。這張表不求完整，只求不誤傷；
-# 需要完整轉換時再評估引入 opencc（那是新依賴，要另外確認）。
+# 主要走 OpenCC 的 s2tw（簡體 → 台灣正體）。
+#
+# 為什麼是 s2tw 而不是 s2twp：s2twp 會做「詞彙」替換，在本語料是災難 ——
+#     測試程序 → 測試程式   （那是 test procedure，不是電腦程式）
+#     參數     → 引數       （引數是程式設計用語，規範講的是測試參數）
+#     設備     → 裝置、數據 → 資料
+# 這些都會把規範術語改掉。s2tw 只做字形與台灣異體字，不動詞彙。
+#
+# 為什麼是 opencc-python-reimplemented 而不是 zhconv：zhconv 是 GPLv2+，
+# 而本專案會打包成 .exe 散布，GPL 的傳染性會波及整個作品。
+# opencc-python-reimplemented 是 Apache 2.0，純 Python、無原生程式碼。
 _S2T = {
     "这": "這", "说": "說", "对": "對", "问": "問", "题": "題", "实": "實", "现": "現",
     "产": "產", "开": "開", "关": "關", "电": "電", "压": "壓", "认": "認", "传": "傳",
@@ -185,10 +193,42 @@ _S2T = {
 }
 _S2T_TABLE = str.maketrans(_S2T)
 
+# s2tw 會把「濕」轉成教育部標準的「溼」，但語料與既有 303 處答案一律用「濕」，
+# 混用會讓同一個詞在畫面上長得不一樣。轉換後再覆寫回來。
+_TW_OVERRIDE = str.maketrans({"溼": "濕"})
+
+
+def _load_opencc():
+    """取得 OpenCC 轉換器；沒安裝就回 None，退回內建對照表。
+
+    做成可失敗的：打包成 .exe 時若 hiddenimports 漏了 opencc，
+    不該讓整個回答流程掛掉 —— 簡繁轉換是加分項，不是必要條件。
+    """
+    try:
+        from opencc import OpenCC
+        return OpenCC("s2tw")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OpenCC 不可用，簡繁轉換退回內建對照表（僅 %d 字）: %s",
+                       len(_S2T), exc)
+        return None
+
+
+_OPENCC = _load_opencc()
+
 
 def to_traditional(text: str) -> str:
-    """把答案裡的簡體字轉回正體。1:1 字元映射，串流時逐段套用也安全。"""
-    return text.translate(_S2T_TABLE) if text else text
+    """把答案裡的簡體字轉回台灣正體。
+
+    OpenCC 可用時走它（涵蓋完整字表且能處理一對多，例如
+    干→幹／乾／干、后→後／后，靠上下文詞組消歧）；
+    不可用時退回內建的 90 字對照表 —— 那張表刻意排除一對多的字，
+    寧可漏轉也不改壞。
+    """
+    if not text:
+        return text
+    if _OPENCC is not None:
+        return _OPENCC.convert(text).translate(_TW_OVERRIDE)
+    return text.translate(_S2T_TABLE)
 
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6}\s*|[-*]\s+|\d+[.、)]\s*)", re.M)
