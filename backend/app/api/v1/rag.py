@@ -332,19 +332,36 @@ def query_stream(
     sources_data = [s.model_dump() for s in sources]
     rag_prompts = config_service.get_rag_prompts()
 
+    user_id = current_user.id
+    conversation_id = payload.conversation_id
+
     def generate():
+        # 純 RAG 模式原本沒有後端存檔，靠前端「整包 PUT」持久化。多對話串下
+        # 那等於用當前畫面覆蓋掉「最近更新的那一條」—— 切到別條對話再問一題
+        # 就會把它洗掉。三種模式的存檔方式必須一致，才不會有一條路徑漏掉。
+        answer_parts = []
         try:
             if not contexts:
-                yield f"data: {json.dumps({'type': 'content', 'text': '查無足夠的相關內容，請提供更多文件或調整問題。'}, ensure_ascii=False)}\n\n"
+                msg = "查無足夠的相關內容，請提供更多文件或調整問題。"
+                answer_parts.append(msg)
+                yield f"data: {json.dumps({'type': 'content', 'text': msg}, ensure_ascii=False)}\n\n"
             else:
                 for stream_chunk in ai.generate_rag_answer_stream(
                     final_question, contexts, conversation_history=history,
                     system_prompt=rag_prompts["system_prompt"],
                     user_template=rag_prompts["user_template"],
                 ):
+                    if stream_chunk.get("type") == "content":
+                        answer_parts.append(stream_chunk.get("text") or "")
                     yield f"data: {json.dumps(stream_chunk, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+            saved = conversations.append_message(
+                db, user_id, conversation_id,
+                question=question, answer="".join(answer_parts),
+                sources=sources_data, mode="rag",
+            )
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': saved.id if saved else None}, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
 

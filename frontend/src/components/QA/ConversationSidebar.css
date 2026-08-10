@@ -1,0 +1,103 @@
+/* 對話串側邊欄（V6）。
+   顏色一律取自 antd 的 CSS 變數，換主題時不用改這裡。 */
+
+.conv-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.conv-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* 捲動時右側留一點空間，滾軸不會壓到「⋯」選單 */
+  padding-right: 2px;
+}
+
+.conv-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: rgba(0, 0, 0, 0.75);
+  transition: background-color 0.15s;
+}
+
+.conv-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.conv-item-active {
+  background: #e6f4ff;
+  color: #0958d9;
+  cursor: default;
+}
+
+.conv-item-active:hover {
+  background: #e6f4ff;
+}
+
+.conv-item:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: -2px;
+}
+
+.conv-icon {
+  flex: none;
+  font-size: 13px;
+  opacity: 0.65;
+  line-height: 1;
+}
+
+/* min-width:0 是讓底下的 ellipsis 生效的關鍵 —— flex 子項預設 min-width:auto，
+   內容再長也不會縮，標題就會把「⋯」選單擠出可視範圍。 */
+.conv-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.conv-title {
+  display: block;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conv-meta {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.conv-more {
+  flex: none;
+  opacity: 0;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: rgba(0, 0, 0, 0.45);
+  transition: opacity 0.15s, background-color 0.15s;
+}
+
+.conv-item:hover .conv-more,
+.conv-item-active .conv-more {
+  opacity: 1;
+}
+
+.conv-more:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* 觸控裝置沒有 hover，選單永遠不會出現 —— 直接常駐顯示 */
+@media (hover: none) {
+  .conv-more { opacity: 1; }
+}

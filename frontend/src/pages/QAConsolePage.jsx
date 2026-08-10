@@ -25,6 +25,8 @@ import remarkGfm from "remark-gfm";
 import AppLayout from "../components/Layout/AppLayout";
 import FollowupInput from "../components/QA/FollowupInput";
 import HistoryMessage from "../components/QA/HistoryMessage";
+import ConversationSidebar from "../components/QA/ConversationSidebar";
+import "../components/QA/ConversationSidebar.css";
 import { markdownComponents, renderAgentSteps, renderSources, renderThinking } from "../components/QA/messageParts";
 import apiClient from "../services/api";
 import useAuthStore from "../stores/authStore";
@@ -69,6 +71,13 @@ const QAConsolePage = () => {
   const [saveNoteLoading, setSaveNoteLoading] = useState(false);
   const conversationEndRef = useRef(null);
   const abortRef = useRef(null);
+  // 對話串（V6）
+  const [conversations, setConversations] = useState([]);
+  const [activeConvId, setActiveConvId] = useState(null);
+  const [convLoading, setConvLoading] = useState(false);
+  // activeConvId 的同步鏡射。串流的 onDone 是在非同步回呼裡執行，
+  // 讀 state 會拿到閉包當下的舊值 —— 送出當下是哪一條，就必須用 ref 取。
+  const activeConvIdRef = useRef(null);
   // Audit H14：鏡射最新的 streamingMsg，讓 onDone 從 ref 讀取最終值，
   // 不必把 setConversationHistory 塞進 setStreamingMsg 的 updater 內
   // （那是 React 明文禁止的副作用，StrictMode 下會 double-invoke → 訊息存兩筆、後端也被 PUT 兩次）。
@@ -126,18 +135,108 @@ const QAConsolePage = () => {
     if (foldersRes.status === "fulfilled") setFolders(foldersRes.value.data ?? []);
   };
 
-  useEffect(() => {
-    loadInitialData();
-    apiClient.get("rag/conversation")
-      .then((res) => setConversationHistory(res.data?.messages ?? []))
-      .catch(() => {});
+  // ── 對話串（V6）────────────────────────────────────────────
+  // 載入清單，並自動開啟最上面那條（釘選優先、其餘依最後更新）。
+  const loadConversations = useCallback(async (selectId) => {
+    setConvLoading(true);
+    try {
+      const res = await apiClient.get("rag/conversations");
+      const list = res.data?.conversations ?? [];
+      setConversations(list);
+      const target = selectId ?? activeConvIdRef.current ?? list[0]?.id ?? null;
+      // 目標可能已被刪除（例如剛刪掉當前這條），退回清單第一條
+      const exists = list.some((c) => c.id === target);
+      return exists ? target : (list[0]?.id ?? null);
+    } catch {
+      return null;
+    } finally {
+      setConvLoading(false);
+    }
+  }, []);
+
+  const openConversation = useCallback(async (id) => {
+    // 切換對話一定要先中止進行中的串流，否則它的 onDone 會把上一條對話的
+    // 答案塞進剛切過來的這條 —— 兩條對話的內容會混在一起。
+    try { abortRef.current?.abort(); } catch { /* ignore */ }
+    abortRef.current = null;
+    setStreaming(null);
+    setLoading(false);
+    setExpandedSnippets({});
+
+    activeConvIdRef.current = id;
+    setActiveConvId(id);
+    if (!id) { setConversationHistory([]); return; }
+    try {
+      const res = await apiClient.get(`rag/conversations/${id}`);
+      setConversationHistory(res.data?.messages ?? []);
+    } catch {
+      setConversationHistory([]);
+      message.error("讀取對話失敗");
+    }
   }, []);
 
   useEffect(() => {
-    if (conversationHistory.length > 0) {
-      apiClient.put("rag/conversation", { messages: conversationHistory }).catch(() => {});
+    loadInitialData();
+    loadConversations().then((id) => { if (id) openConversation(id); });
+  }, [loadConversations, openConversation]);
+
+  // 送出時若還沒有對話串（activeConvId 為 null），後端會自動開一條並在
+  // done 事件回傳它的 id。這裡接住它，否則同一條對話的第二題又會再開一條新的。
+  const syncConversationId = useCallback((doneEvt) => {
+    const id = doneEvt?.conversation_id;
+    if (id && id !== activeConvIdRef.current) {
+      activeConvIdRef.current = id;
+      setActiveConvId(id);
     }
-  }, [conversationHistory]);
+    // 訊息數與排序都變了，刷新側邊欄。不改變當前選取。
+    loadConversations(activeConvIdRef.current);
+  }, [loadConversations]);
+
+  const handleCreateConversation = useCallback(async () => {
+    try {
+      const res = await apiClient.post("rag/conversations", {});
+      await loadConversations(res.data.id);
+      await openConversation(res.data.id);
+    } catch {
+      message.error("建立對話失敗");
+    }
+  }, [loadConversations, openConversation]);
+
+  const handleRenameConversation = useCallback(async (id, title) => {
+    try {
+      await apiClient.patch(`rag/conversations/${id}`, { title });
+      await loadConversations();
+    } catch {
+      message.error("重新命名失敗");
+    }
+  }, [loadConversations]);
+
+  const handleTogglePin = useCallback(async (id, pinned) => {
+    try {
+      await apiClient.patch(`rag/conversations/${id}`, { is_pinned: pinned });
+      await loadConversations();
+    } catch {
+      message.error("操作失敗");
+    }
+  }, [loadConversations]);
+
+  const handleDeleteConversation = useCallback(async (id) => {
+    try {
+      await apiClient.delete(`rag/conversations/${id}`);
+      const wasActive = id === activeConvIdRef.current;
+      if (wasActive) activeConvIdRef.current = null;
+      const next = await loadConversations();
+      if (wasActive) await openConversation(next);
+      message.success("已刪除");
+    } catch {
+      message.error("刪除失敗");
+    }
+  }, [loadConversations, openConversation]);
+
+  // 這裡原本有一個「conversationHistory 一變就 PUT 整包」的自動存檔。
+  // 多對話串下那是有害的：PUT 打的是「最近更新的那一條」，切到別條對話
+  // 再問一題就會把它整包覆蓋掉。三種查詢模式現在都在後端各自 append
+  // 到正確的 conversation_id，前端不需要也不應該再自己存。
 
   // Helper: get auth token
   const getToken = () => {
@@ -195,7 +294,7 @@ const QAConsolePage = () => {
           if (event.type === "thinking") onThinking?.(event.text || "");
           else if (event.type === "content") onContent?.(event.text || "");
           else if (event.type === "sources") onSources?.(event);
-          else if (event.type === "done") { finished = true; onDone?.(); }
+          else if (event.type === "done") { finished = true; onDone?.(event); }
           else if (event.type === "error") { finished = true; onError?.(event.message); }
         } catch { /* ignore */ }
       }
@@ -253,7 +352,7 @@ const QAConsolePage = () => {
         try {
           const data = JSON.parse(dataStr);
           if (eventName === "final") onFinal?.(data);
-          else if (eventName === "done") { finished = true; onDone?.(); }
+          else if (eventName === "done") { finished = true; onDone?.(data); }
           else if (eventName === "error") { finished = true; onError?.(data.message || "Agent 失敗"); }
           else onEvent?.(eventName, data);
         } catch {
@@ -300,7 +399,7 @@ const QAConsolePage = () => {
       : [];
 
     try {
-      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5, ...buildScopePayload() }, {
+      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5, ...buildScopePayload(), conversation_id: activeConvIdRef.current }, {
         onEvent: (eventName, data) => {
           setStreaming((prev) => prev ? {
             ...prev,
@@ -310,7 +409,8 @@ const QAConsolePage = () => {
         onFinal: (data) => {
           setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
         },
-        onDone: () => {
+        onDone: (doneEvt) => {
+          syncConversationId(doneEvt);
           const prev = streamingMsgRef.current;
           if (prev) {
             const newMsg = {
@@ -359,7 +459,7 @@ const QAConsolePage = () => {
       ? conversationHistory.map((m) => ({ question: m.question, answer: m.answer }))
       : [];
     try {
-      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5, ...buildScopePayload() }, {
+      await postAgentStream({ question, conversation_history: historyForAgent, max_steps: 8, top_k: 5, ...buildScopePayload(), conversation_id: activeConvIdRef.current }, {
         onEvent: (eventName, data) => {
           if (eventName === "route") {
             // rag 子模式不需要顯示「推理過程」面板
@@ -371,7 +471,8 @@ const QAConsolePage = () => {
         onFinal: (data) => {
           setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
         },
-        onDone: () => {
+        onDone: (doneEvt) => {
+          syncConversationId(doneEvt);
           const prev = streamingMsgRef.current;
           if (prev) {
             const newMsg = {
@@ -418,7 +519,8 @@ const QAConsolePage = () => {
               thinkingDone: true,
             } : null
           ),
-        onDone: () => {
+        onDone: (doneEvt) => {
+          syncConversationId(doneEvt);
           const prev = streamingMsgRef.current;
           if (prev) {
             const newMsg = {
@@ -478,6 +580,7 @@ const QAConsolePage = () => {
       conversation_history: conversationHistory.map((m) => ({ question: m.question, answer: m.answer })),
       use_ai_fallback: false,
       skip_ai_understanding: true,
+      conversation_id: activeConvIdRef.current,
     };
     await runStream(payload, question);
   };
@@ -508,6 +611,7 @@ const QAConsolePage = () => {
       conversation_history: conversationHistory.map((m) => ({ question: m.question, answer: m.answer })),
       use_ai_fallback: false,
       skip_ai_understanding: false,
+      conversation_id: activeConvIdRef.current,
     };
     await runStream(payload, question);
   };
@@ -520,8 +624,19 @@ const QAConsolePage = () => {
     setLoading(false);
     setExpandedSnippets({});
     setConversationHistory([]);
-    apiClient.delete("rag/conversation").catch(() => {});
-    message.success("對話歷史已清除");
+    // V6：只刪「當前這條」對話，不是清光全部。舊版每人只有一條，
+    // 「清除歷史」等同清光；現在有多條，沿用舊語意會把別條也砍掉。
+    const id = activeConvIdRef.current;
+    if (id) {
+      apiClient.delete(`rag/conversations/${id}`)
+        .then(async () => {
+          activeConvIdRef.current = null;
+          const next = await loadConversations();
+          await openConversation(next);
+        })
+        .catch(() => message.error("刪除失敗"));
+    }
+    message.success("已刪除這條對話");
   };
 
   // 以下三個 callback 要保持穩定參考，memo 化的 HistoryMessage 才不會白做工。
@@ -661,7 +776,26 @@ const QAConsolePage = () => {
   return (
     <AppLayout>
       <Row gutter={16}>
-        <Col xs={24} lg={8}>
+        {/* 對話串側邊欄。窄螢幕時排在最上面（xs={24}），不做收折 ——
+            這一版先把功能做對，收折留給之後的整體版面改造。 */}
+        <Col xs={24} lg={5}>
+          <Card
+            title="對話"
+            styles={{ body: { padding: 12, height: "calc(100vh - 220px)", minHeight: 320 } }}
+          >
+            <ConversationSidebar
+              conversations={conversations}
+              activeId={activeConvId}
+              loading={convLoading}
+              onSelect={openConversation}
+              onCreate={handleCreateConversation}
+              onRename={handleRenameConversation}
+              onTogglePin={handleTogglePin}
+              onDelete={handleDeleteConversation}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} lg={7}>
           <Card
             title="查詢設定"
             style={{ position: "sticky", top: 16 }}
@@ -749,7 +883,7 @@ const QAConsolePage = () => {
             </Form>
           </Card>
         </Col>
-        <Col xs={24} lg={16}>
+        <Col xs={24} lg={12}>
           <Card title={`對話記錄 (${conversationHistory.length})`}>
             {conversationHistory.length === 0 && !streamingMsg ? (
               <Empty description="尚未開始對話，請先在左側輸入問題以開始查詢" style={{ padding: "48px 0" }} />

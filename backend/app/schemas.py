@@ -313,6 +313,9 @@ class RAGQueryRequest(BaseModel):
     use_ai_fallback: bool = False
     # 是否跳過 AI 理解（用於新問題輸入，不進行 AI 優化）
     skip_ai_understanding: bool = False
+    # 這輪要寫進哪一條對話串（V6）。留空代表開新的一條，
+    # done 事件會回傳實際的 conversation_id。
+    conversation_id: Optional[str] = None
 
 
 class RAGQueryResponse(BaseModel):
