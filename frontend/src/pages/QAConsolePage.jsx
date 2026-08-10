@@ -9,15 +9,15 @@ import {
   InputNumber,
   Modal,
   Row,
+  Segmented,
   Select,
   Space,
   Tag,
   TreeSelect,
   Typography,
-  Alert,
   message,
 } from "antd";
-import { DeleteOutlined, SaveOutlined, QuestionCircleOutlined } from "@ant-design/icons";
+import { DeleteOutlined, SaveOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import AppLayout from "../components/Layout/AppLayout";
@@ -889,7 +889,6 @@ const QAConsolePage = () => {
             <Composer
               loading={loading}
               qaMode={qaMode}
-              onModeChange={changeQaMode}
               onSubmit={handleComposerSubmit}
               onStop={stopInFlight}
               onOpenSettings={() => setSettingsOpen(true)}
@@ -911,6 +910,31 @@ const QAConsolePage = () => {
         width={340}
         destroyOnHidden={false}
       >
+        {/* 查詢模式改放這裡當進階選項。混合（自動路由）幾乎總是對的：
+            路由本身是確定性規則、微秒級成本，內容題走 RAG（快）、
+            關係／列舉題走 Agent。手動鎖定 Agent 會讓所有內容題都付
+            3–15 秒的多步推理代價，而那類題目 Agent 沒有優勢。 */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 13, marginBottom: 6 }}>查詢模式</div>
+          <Segmented
+            block
+            value={qaMode}
+            onChange={changeQaMode}
+            options={[
+              { label: "混合（建議）", value: "hybrid" },
+              { label: "純 RAG", value: "rag" },
+              { label: "Agent", value: "agent" },
+            ]}
+          />
+          <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+            {qaMode === "hybrid"
+              ? "自動判斷：內容題走 RAG（快），關係／列舉題走 Agent。答案上方會標示實際走了哪一邊。"
+              : qaMode === "agent"
+                ? "所有問題都走多步推理，單次 3–15 秒。內容題不會因此更準，只會更慢。"
+                : "所有問題都走單次檢索。關係／列舉題（「有哪些 ANNEX」「誰取代了 X」）會答不好。"}
+          </Text>
+        </div>
+
         <Form
           form={form}
           layout="vertical"
@@ -950,14 +974,6 @@ const QAConsolePage = () => {
           </Button>
         )}
 
-        <Alert
-          style={{ marginTop: 16 }}
-          type="info"
-          showIcon
-          icon={<QuestionCircleOutlined />}
-          message="關於模式"
-          description="混合（預設）會自動判斷：內容題走純 RAG（快），關係／列舉題走 Agent（會跨規範追引用，較慢）。模式選擇在輸入框上方。"
-        />
       </Drawer>
 
       {/* 儲存筆記 Modal */}

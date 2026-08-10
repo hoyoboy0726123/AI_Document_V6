@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Button, Input, Segmented, Tag, Tooltip } from "antd";
+import { Button, Input, Tag, Tooltip } from "antd";
 import { SendOutlined, StopOutlined, SettingOutlined } from "@ant-design/icons";
 import apiClient from "../../services/api";
 
@@ -21,7 +21,6 @@ const { TextArea } = Input;
 const Composer = memo(function Composer({
   loading,
   qaMode,
-  onModeChange,
   onSubmit,
   onStop,
   onOpenSettings,
@@ -80,16 +79,22 @@ const Composer = memo(function Composer({
   return (
     <div className="composer">
       <div className="composer-ctx">
-        <Segmented
-          size="small"
-          value={qaMode}
-          onChange={onModeChange}
-          options={[
-            { label: "純RAG", value: "rag" },
-            { label: "混合", value: "hybrid" },
-            { label: "Agent", value: "agent" },
-          ]}
-        />
+        {/* 模式選擇移進設定抽屜。混合是預設且幾乎總是對的（路由是確定性規則，
+            微秒級），三選一對使用者只是多餘的認知負擔。
+            但「被鎖在非預設模式」必須看得見 —— 否則使用者會納悶為什麼每次都要
+            十幾秒（Agent），卻找不到原因。預設模式安靜，非預設才出聲。 */}
+        {qaMode !== "hybrid" && (
+          <Tooltip title="已手動鎖定查詢模式。點一下開啟設定改回「混合（自動）」。">
+            <Tag
+              className="composer-tag composer-state"
+              color="purple"
+              bordered={false}
+              onClick={onOpenSettings}
+            >
+              已鎖定：{qaMode === "agent" ? "Agent" : "純 RAG"}
+            </Tag>
+          </Tooltip>
+        )}
         {scopeLabel && (
           <Tag className="composer-tag" color="blue" bordered={false}>
             範圍：{scopeLabel}
