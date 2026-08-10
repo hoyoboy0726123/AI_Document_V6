@@ -100,7 +100,10 @@ const AppSidebar = () => {
       {/* 彈性空白，讓版本號沉到底部 */}
       <div style={{ flex: 1 }} />
 
-      {/* 版本號 — 永遠固定在最底部 */}
+      {/* 版本號與授權 — 永遠固定在最底部。
+          原始碼連結不是裝飾：本專案相依 PyMuPDF（AGPL 3.0），而 AGPL 第 13 條
+          要求「透過網路使用本服務的人」必須能取得完整原始碼。同事在區網連進來
+          用就屬於這個情形，所以介面上必須有一個明顯可見的取得管道。 */}
       <div
         style={{
           padding: "10px 16px",
@@ -109,9 +112,21 @@ const AppSidebar = () => {
           borderTop: "1px solid rgba(255,255,255,0.08)",
           flexShrink: 0,
           letterSpacing: 0.5,
+          lineHeight: 1.7,
         }}
       >
-        版本號：V1
+        <div>版本號：V6</div>
+        <div>
+          AGPL-3.0 ·{" "}
+          <a
+            href="https://github.com/hoyoboy0726123/AI_Document_V6"
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "rgba(255,255,255,0.55)" }}
+          >
+            原始碼
+          </a>
+        </div>
       </div>
     </Sider>
   );
