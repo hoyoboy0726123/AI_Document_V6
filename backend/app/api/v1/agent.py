@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ... import models, schemas
 from ...core.security import get_current_user
 from ...database import SessionLocal, get_db
-from ...services import agent
+from ...services import agent, conversations
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,6 +44,7 @@ def agent_chat(
     history = payload.conversation_history or []
     max_steps = payload.max_steps
     user_id = current_user.id
+    conversation_id = payload.conversation_id
 
     def event_stream():
         db = SessionLocal()
@@ -75,37 +76,15 @@ def agent_chat(
                 else:
                     yield _sse(etype or "info", evt)
 
-            # Save to UserConversation (mode=agent flag in payload so frontend
-            # can render this thread separately if it wants)
-            try:
-                row = (
-                    db.query(models.UserConversation)
-                    .filter_by(user_id=user_id)
-                    .first()
-                )
-                entry = {
-                    "question": question,
-                    "answer": final_text,
-                    # 持久化 sources，否則重整頁面後從 DB 載回的訊息沒有來源
-                    # → 前端「預覽 / 儲存筆記」消失（兩者都看 msg.sources）。
-                    "sources": final_sources,
-                    "mode": "agent",
-                    "agentMode": True,
-                    "timestamp": datetime.utcnow().isoformat(),
-                }
-                if row:
-                    from sqlalchemy.orm.attributes import flag_modified
-                    row.messages = (row.messages or []) + [entry]
-                    flag_modified(row, "messages")
-                else:
-                    row = models.UserConversation(user_id=user_id, messages=[entry])
-                    db.add(row)
-                db.commit()
-            except Exception as db_err:
-                logger.warning("agent conversation save failed: %s", db_err)
-                db.rollback()
-
-            yield _sse("done", {"ok": True})
+            # 寫進對話串。conversation_id 為空時 append_message 會自動開一條，
+            # 並把 id 回給前端 —— 前端要靠它知道這輪落在哪一串上。
+            saved = conversations.append_message(
+                db, user_id, conversation_id,
+                question=question, answer=final_text,
+                sources=final_sources, mode="agent",
+            )
+            yield _sse("done", {"ok": True,
+                                "conversation_id": saved.id if saved else None})
         except Exception as e:
             logger.error("agent stream failed: %s", e, exc_info=True)
             yield _sse("error", {"message": str(e)})
@@ -135,6 +114,7 @@ def agent_route(
     history = payload.conversation_history or []
     max_steps = payload.max_steps
     user_id = current_user.id
+    conversation_id = payload.conversation_id
     mode = agent.route_mode(question)
 
     def event_stream():
@@ -164,23 +144,13 @@ def agent_route(
                 final_text, final_sources = agent.run_rag_only(db, question, conversation_history=history)
                 yield _sse("final", {"text": final_text, "sources": final_sources})
 
-            try:
-                row = db.query(models.UserConversation).filter_by(user_id=user_id).first()
-                entry = {"question": question, "answer": final_text, "sources": final_sources,
-                         "mode": f"hybrid:{mode}", "agentMode": (mode == "agent"),
-                         "timestamp": datetime.utcnow().isoformat()}
-                if row:
-                    from sqlalchemy.orm.attributes import flag_modified
-                    row.messages = (row.messages or []) + [entry]
-                    flag_modified(row, "messages")
-                else:
-                    db.add(models.UserConversation(user_id=user_id, messages=[entry]))
-                db.commit()
-            except Exception as db_err:
-                logger.warning("hybrid conversation save failed: %s", db_err)
-                db.rollback()
-
-            yield _sse("done", {"ok": True, "mode": mode})
+            saved = conversations.append_message(
+                db, user_id, conversation_id,
+                question=question, answer=final_text,
+                sources=final_sources, mode=f"hybrid:{mode}",
+            )
+            yield _sse("done", {"ok": True, "mode": mode,
+                                "conversation_id": saved.id if saved else None})
         except Exception as e:
             logger.error("hybrid route failed: %s", e, exc_info=True)
             yield _sse("error", {"message": str(e)})

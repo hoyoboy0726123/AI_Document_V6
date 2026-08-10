@@ -289,6 +289,33 @@ class UserConversation(Base):
     user: Mapped["User"] = relationship("User")
 
 
+class Conversation(BaseMixin, Base):
+    """一條對話串（V6）。取代 UserConversation 的「每人一條扁平清單」。
+
+    為什麼是新的表而不是改舊表：UserConversation 的主鍵就是 user_id，
+    結構上每人只能有一條。要支援多對話串，主鍵必須是對話自己的 id。
+
+    messages 沿用 JSON 欄位而不是拆成獨立的 messages 表：
+      * 前端本來就是整條載入、整條顯示，沒有分頁需求
+      * 既有的 append 寫法（row.messages = [...] + [entry]）可以直接沿用，
+        API 與前端的改動面小很多
+      * 代價是無法跨訊息查詢；真的需要全文搜尋對話時再拆表
+    """
+    __tablename__ = "conversations"
+    __table_args__ = (
+        # 側邊欄固定用「這個人的對話、依最後更新排序」查詢
+        Index("idx_conversation_user_updated", "user_id", "updated_at"),
+    )
+
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), default="新對話", nullable=False)
+    messages: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list, nullable=False)
+    # 釘選：側邊欄置頂。刪除採硬刪除，不做軟刪除欄位 —— 使用者按刪除就是要它消失。
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    user: Mapped["User"] = relationship("User")
+
+
 class DocumentNote(BaseMixin, Base):
     """
     User saved notes from AI conversation.

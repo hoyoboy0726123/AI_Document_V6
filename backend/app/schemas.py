@@ -664,3 +664,6 @@ class AgentChatRequest(BaseModel):
     project_id: Optional[str] = None
     document_id: Optional[str] = None
     folder_ids: Optional[List[str]] = None
+    # 這輪要寫進哪一條對話串（V6）。留空代表開新的一條，
+    # 後端會在 done 事件回傳實際的 conversation_id 讓前端接上。
+    conversation_id: Optional[str] = None

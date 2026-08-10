@@ -8,12 +8,13 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from ... import models, schemas
 from ...core.config import settings
 from ...core.security import get_current_user
 from ...database import get_db
-from ...services import agent, ai, pdf_image, rerank, retrieval
+from ...services import agent, ai, conversations, pdf_image, rerank, retrieval
 from ...services.system_config import SystemConfigService
 
 
@@ -540,16 +541,90 @@ def get_rag_config(current_user=Depends(get_current_user)):
     return {"max_pdf_analysis_pages": settings.MAX_PDF_ANALYSIS_PAGES}
 
 
+# ── 多對話串（V6）──────────────────────────────────────────
+# 舊的 /conversation 三個端點保留，指向「最近更新的那一條」，
+# 讓尚未改版的前端不會壞掉；新前端改用底下的 /conversations。
+
+
+@router.get("/conversations")
+def list_conversations(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """側邊欄用的對話清單（不含 messages）。"""
+    rows = conversations.list_for_user(db, current_user.id)
+    return {"conversations": [conversations.to_summary(r) for r in rows]}
+
+
+@router.post("/conversations")
+def create_conversation(
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """開一條新對話。前端按「＋ 新對話」時呼叫。"""
+    title = (payload or {}).get("title")
+    row = conversations.create(db, current_user.id, title=title)
+    return conversations.to_summary(row)
+
+
+@router.get("/conversations/{conversation_id}")
+def get_conversation_by_id(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    row = conversations.get_owned(db, current_user.id, conversation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="找不到這條對話")
+    return {**conversations.to_summary(row), "messages": row.messages or []}
+
+
+@router.patch("/conversations/{conversation_id}")
+def update_conversation(
+    conversation_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """改標題或釘選狀態。"""
+    row = conversations.get_owned(db, current_user.id, conversation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="找不到這條對話")
+    if "title" in payload:
+        title = (payload.get("title") or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="標題不可為空")
+        row.title = title[:200]
+    if "is_pinned" in payload:
+        row.is_pinned = bool(payload.get("is_pinned"))
+    db.commit()
+    db.refresh(row)
+    return conversations.to_summary(row)
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+def delete_conversation(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    row = conversations.get_owned(db, current_user.id, conversation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="找不到這條對話")
+    db.delete(row)
+    db.commit()
+    return None
+
+
 @router.get("/conversation")
 def get_conversation(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """取得當前使用者的對話紀錄"""
-    row = db.query(models.UserConversation).filter(
-        models.UserConversation.user_id == current_user.id
-    ).first()
-    return {"messages": row.messages if row else []}
+    """相容用：取最近更新的那條對話。新前端請改用 /conversations。"""
+    rows = conversations.list_for_user(db, current_user.id)
+    return {"messages": (rows[0].messages if rows else []) or []}
 
 
 @router.put("/conversation")
@@ -558,17 +633,23 @@ def save_conversation(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """儲存當前使用者的對話紀錄"""
+    """相容用：整包覆寫最近更新的那條對話（沒有就開一條）。
+
+    V6 之後應改用 /conversations/{id}；這裡保留是為了讓尚未改版的前端
+    不會靜默寫進舊表 —— 那會造成「前端顯示有、側邊欄看不到」的分裂狀態。
+    """
     messages = payload.get("messages", [])
-    row = db.query(models.UserConversation).filter(
-        models.UserConversation.user_id == current_user.id
-    ).first()
-    if row:
+    rows = conversations.list_for_user(db, current_user.id)
+    if rows:
+        row = rows[0]
         row.messages = messages
+        flag_modified(row, "messages")
+        db.commit()
     else:
-        row = models.UserConversation(user_id=current_user.id, messages=messages)
-        db.add(row)
-    db.commit()
+        first_q = (messages[0].get("question") if messages else "") or ""
+        conversations.create(db, current_user.id,
+                             title=conversations.make_title(first_q),
+                             messages=messages)
     return {"ok": True}
 
 
@@ -577,9 +658,14 @@ def clear_conversation(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """清除當前使用者的對話紀錄"""
-    db.query(models.UserConversation).filter(
-        models.UserConversation.user_id == current_user.id
+    """相容用：清除這位使用者的全部對話串。
+
+    V6 的「清除歷史」語意變了 —— 舊版只有一條，清掉就是清掉；
+    現在有多條，所以這個端點會刪光全部。前端改版後應改用
+    DELETE /conversations/{id} 逐條刪除。
+    """
+    db.query(models.Conversation).filter(
+        models.Conversation.user_id == current_user.id
     ).delete()
     db.commit()
     return None

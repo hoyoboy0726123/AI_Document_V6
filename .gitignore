@@ -54,3 +54,6 @@ backend/storage/lightrag/
 # 評測腳本的結果傾印(可重跑產生，不進版控)
 backend/scripts/*_detail.json
 backend/scripts/*_eval.json
+
+# DB 備份（migration 前留存，體積大且含實際資料）
+backend/doc_management.db.bak*
