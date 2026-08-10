@@ -154,7 +154,79 @@ def _squelch_repetition(text: str) -> str:
     out = re.sub(r"([A-Za-z]{1,4})(?:\1){6,}", lambda m: m.group(1) * 4, out)
     # Punctuation floods
     out = re.sub(r"([。．．。！，!?,，、\.\-–—])\1{3,}", lambda m: m.group(1) * 3, out)
+    # 段落級重複與簡體字。掛在這裡而不是各出口自己呼叫：這個函式是所有
+    # 回應出口（9 個呼叫點）共同經過的清理鏈，加在這裡才不會漏掉某一條路徑。
+    out = dedupe_sections(out)
+    out = to_traditional(out)
     return out
+
+
+# 簡體 → 正體。提示詞裡的「嚴禁使用簡體中文」實測會被忽略：151 則答案裡
+# 有 1 則混進簡體（「摆錘」的「摆」，而同一則的內文又寫對成「擺」）。
+# 比例低但無法預測，且使用者拿這些字去查料號／規範會查不到。
+#
+# 刻意只收「正體書寫不會用到的簡體形」，排除 后／里／干／准／面 這類兩邊都有的字 ——
+# 無差別轉換會把正確的正體字改壞。這張表不求完整，只求不誤傷；
+# 需要完整轉換時再評估引入 opencc（那是新依賴，要另外確認）。
+_S2T = {
+    "这": "這", "说": "說", "对": "對", "问": "問", "题": "題", "实": "實", "现": "現",
+    "产": "產", "开": "開", "关": "關", "电": "電", "压": "壓", "认": "認", "传": "傳",
+    "输": "輸", "总": "總", "处": "處", "结": "結", "构": "構", "组": "組", "织": "織",
+    "专": "專", "业": "業", "务": "務", "员": "員", "写": "寫", "读": "讀", "击": "擊",
+    "选": "選", "择": "擇", "录": "錄", "设": "設", "备": "備", "条": "條", "码": "碼",
+    "数": "數", "库": "庫", "网": "網", "络": "絡", "软": "軟", "摆": "擺", "没": "沒",
+    "变": "變", "应": "應", "时": "時", "间": "間", "发": "發", "国": "國", "际": "際",
+    "检": "檢", "验": "驗", "动": "動", "线": "線", "终": "終", "规": "規", "学": "學",
+    "习": "習", "让": "讓", "见": "見", "观": "觀", "单": "單", "质": "質", "换": "換",
+    "类": "類", "级": "級", "项": "項", "据": "據", "会": "會", "书": "書", "点": "點",
+    "个": "個", "样": "樣", "长": "長", "门": "門", "车": "車", "马": "馬", "鸟": "鳥",
+    "风": "風", "飞": "飛", "东": "東", "乐": "樂", "岁": "歲", "万": "萬", "亿": "億",
+    "严": "嚴", "丽": "麗", "举": "舉", "义": "義", "乡": "鄉", "亚": "亞", "产": "產",
+}
+_S2T_TABLE = str.maketrans(_S2T)
+
+
+def to_traditional(text: str) -> str:
+    """把答案裡的簡體字轉回正體。1:1 字元映射，串流時逐段套用也安全。"""
+    return text.translate(_S2T_TABLE) if text else text
+
+
+_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6}\s*|[-*]\s+|\d+[.、)]\s*)", re.M)
+
+
+def dedupe_sections(text: str) -> str:
+    """移除「整段一字不差重複」的區段。
+
+    貪婪解碼（temperature=0，本專案為了評測可重現而設）本來就容易卡在重複迴圈。
+    實測「列出所有衝擊測試的測試條件」一題，第 8/9/10 項是完全相同的三段。
+    _squelch_repetition 只處理字元級重複，擋不到這種段落級的。
+
+    只在「正規化後完全相同」時才刪 —— 差一個字就保留。
+    規範文件本來就常有相似但不同的條目（不同方法的同名程序），
+    寬鬆比對會把真內容刪掉，那比留著重複更糟。
+    """
+    if not text or len(text) < 200:
+        return text
+    lines = text.splitlines()
+    # 以標題／條列行為界切段
+    starts = [i for i, ln in enumerate(lines) if _HEADING_RE.match(ln)]
+    if len(starts) < 3:
+        return text
+    starts.append(len(lines))
+    out, seen, removed = lines[: starts[0]], set(), 0
+    for a, b in zip(starts, starts[1:]):
+        block = lines[a:b]
+        # 去掉開頭的編號再比對，否則「8. X」與「9. X」永遠不相等
+        key = re.sub(r"^\s*(#{1,6}\s*)?\d+[.、)]\s*", "", "\n".join(block)).strip()
+        key = re.sub(r"\s+", "", key)
+        if key and key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        out.extend(block)
+    if removed:
+        logger.info("移除 %d 個完全重複的段落（貪婪解碼的重複迴圈）", removed)
+    return "\n".join(out)
 
 
 def _strip_control_tokens(text: str) -> str:
@@ -690,7 +762,11 @@ class OllamaClient:
                     continue
                 msg = data.get("message") or {}
                 # Incremental delta content
-                delta = msg.get("content")
+                # 串流時只做字元級的簡繁轉換（1:1 映射，跨 chunk 邊界也安全）。
+                # 段落級去重需要看到完整答案，做不到即時 —— 使用者可能會短暫
+                # 看到重複的段落，但存進對話串的版本已經去重過（append_message
+                # 前會再跑一次清理）。
+                delta = to_traditional(msg.get("content") or "") or None
                 if isinstance(delta, str) and delta:
                     yield {"type": "content", "text": delta}
                 # Some models surface "thinking" per chunk

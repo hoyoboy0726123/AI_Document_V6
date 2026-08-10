@@ -356,9 +356,12 @@ def query_stream(
                     yield f"data: {json.dumps(stream_chunk, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
 
+            # 串流是逐段送出的，段落級去重當下做不到（需要完整答案）。
+            # 存檔前補跑一次，至少讓對話串裡留下的是乾淨版本。
+            from ...services.ollama_client import dedupe_sections
             saved = conversations.append_message(
                 db, user_id, conversation_id,
-                question=question, answer="".join(answer_parts),
+                question=question, answer=dedupe_sections("".join(answer_parts)),
                 sources=sources_data, mode="rag",
             )
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': saved.id if saved else None}, ensure_ascii=False)}\n\n"

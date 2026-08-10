@@ -36,8 +36,10 @@ items = r.json()["conversations"]
 check("搬遷的舊對話存在", any(i["title"] == "舊對話（V5 匯入）" for i in items),
       f"共 {len(items)} 條")
 legacy = next((i for i in items if i["title"] == "舊對話（V5 匯入）"), None)
-check("舊對話訊息數為 148", legacy and legacy["message_count"] == 148,
-      f"→ {legacy['message_count'] if legacy else 'N/A'}")
+# 不綁死具體數字：使用者每問一題這條就會 +1，寫死只會讓測試在正常使用後變紅。
+# 這裡要驗的是「搬遷有把整包帶過來」，用「遠多於一則」判斷就夠。
+check("舊對話保有大量歷史訊息", legacy and legacy["message_count"] >= 100,
+      f"→ {legacy['message_count'] if legacy else 'N/A'} 則")
 check("列表不含 messages（避免整包送出）", legacy is not None and "messages" not in legacy)
 
 # ── 建立 ──
