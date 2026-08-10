@@ -21,6 +21,17 @@
   font-size: 12px;
 }
 
+/* 判定狀態標籤是可點擊的（切換延續／新問題），要讓人看得出來 */
+.composer-state {
+  cursor: pointer;
+  user-select: none;
+  transition: filter 0.15s;
+}
+
+.composer-state:hover {
+  filter: brightness(0.94);
+}
+
 .composer-box {
   display: flex;
   align-items: flex-end;
