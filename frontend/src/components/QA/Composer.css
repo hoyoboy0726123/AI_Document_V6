@@ -1,0 +1,49 @@
+/* 合併後的單一輸入框（V6）。 */
+
+.composer {
+  border-top: 1px solid #f0f0f0;
+  padding: 10px 4px 4px;
+  background: #fff;
+}
+
+.composer-ctx {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.composer-spacer { flex: 1; }
+
+.composer-tag {
+  margin-inline-end: 0;
+  font-size: 12px;
+}
+
+.composer-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 12px;
+  padding: 6px 6px 6px 12px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.composer-box:focus-within {
+  border-color: #4096ff;
+  box-shadow: 0 0 0 2px rgba(5, 145, 255, 0.1);
+}
+
+/* TextArea 用 borderless，但 antd 仍會留 padding，這裡對齊送出鈕的基線 */
+.composer-box .ant-input {
+  padding: 4px 0;
+  resize: none;
+}
+
+.composer-hint {
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.4);
+  padding: 6px 4px 0;
+}

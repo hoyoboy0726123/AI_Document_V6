@@ -400,6 +400,49 @@ def resolve_followup_question(question: str,
     return rewritten
 
 
+def classify_followup(question: str,
+                      conversation_history: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """判斷這句是「延續上一輪」還是「新問題」，供前端在送出前顯示可覆蓋的標籤。
+
+    刻意是純規則、不呼叫 LLM：這個結果要隨打字即時更新，
+    交給 Agent 判斷會在使用者還沒按送出之前就花 1–8 秒。
+
+    回傳 {is_followup, inherited, rewritten, reason}。
+    reason 是給介面顯示用的短句 —— 使用者要能看懂「為什麼系統這樣判斷」，
+    才有辦法決定要不要按掉那個標籤。
+
+    這裡只做判斷，實際改寫仍由 resolve_followup_question 在檢索前執行，
+    兩者共用同一組條件，不會出現「標籤說延續、實際沒延續」的落差。
+    """
+    q = (question or "").strip()
+    if not q:
+        return {"is_followup": False, "inherited": None, "rewritten": q, "reason": ""}
+
+    inherited = _history_subject(conversation_history)
+    if not inherited:
+        return {"is_followup": False, "inherited": None, "rewritten": q,
+                "reason": "沒有可延續的上一輪主體"}
+
+    rewritten = resolve_followup_question(q, conversation_history)
+    if rewritten != q:
+        subj = _find_subject(q)
+        reason = (f"「{subj}」是參數名不是測試名，沿用上一輪的「{inherited}」"
+                  if subj else f"問句未指名測試，沿用上一輪的「{inherited}」")
+        return {"is_followup": True, "inherited": inherited,
+                "rewritten": rewritten, "reason": reason}
+
+    subj = _find_subject(q)
+    if subj and subj != inherited:
+        return {"is_followup": False, "inherited": inherited, "rewritten": q,
+                "reason": f"問句自己指名了「{subj}」，視為新問題"}
+    if len(q) > _FOLLOWUP_MAX_LEN:
+        return {"is_followup": False, "inherited": inherited, "rewritten": q,
+                "reason": "問句完整，視為新問題"}
+    # 短、無新主體、也沒被改寫（例如已自帶同一個主體）→ 仍屬延續
+    return {"is_followup": True, "inherited": inherited, "rewritten": q,
+            "reason": f"延續上一輪的「{inherited}」"}
+
+
 def _clarify_scope_text(db: Session, question: str) -> str:
     """問題缺少查詢對象時的反問內容。
 

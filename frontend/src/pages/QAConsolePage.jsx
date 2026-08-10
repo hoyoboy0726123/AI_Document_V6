@@ -3,29 +3,28 @@ import {
   Button,
   Card,
   Col,
+  Drawer,
   Empty,
   Form,
-  Input,
   InputNumber,
   Modal,
   Row,
-  Segmented,
   Select,
   Space,
   Tag,
-  Tooltip,
   TreeSelect,
   Typography,
   Alert,
   message,
 } from "antd";
-import { DeleteOutlined, SaveOutlined, SendOutlined, QuestionCircleOutlined, StopOutlined } from "@ant-design/icons";
+import { DeleteOutlined, SaveOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import AppLayout from "../components/Layout/AppLayout";
-import FollowupInput from "../components/QA/FollowupInput";
 import HistoryMessage from "../components/QA/HistoryMessage";
 import ConversationSidebar from "../components/QA/ConversationSidebar";
+import Composer from "../components/QA/Composer";
+import "../components/QA/Composer.css";
 import "../components/QA/ConversationSidebar.css";
 import { markdownComponents, renderAgentSteps, renderSources, renderThinking } from "../components/QA/messageParts";
 import apiClient from "../services/api";
@@ -75,6 +74,10 @@ const QAConsolePage = () => {
   const [conversations, setConversations] = useState([]);
   const [activeConvId, setActiveConvId] = useState(null);
   const [convLoading, setConvLoading] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 表單值的鏡射，供輸入框上方的「範圍」標籤即時顯示。
+  // Form 內部的值變動不會觸發重繪，必須自己存一份。
+  const [currentDocScope, setCurrentDocScope] = useState(null);
   // activeConvId 的同步鏡射。串流的 onDone 是在非同步回呼裡執行，
   // 讀 state 會拿到閉包當下的舊值 —— 送出當下是哪一條，就必須用 ref 取。
   const activeConvIdRef = useRef(null);
@@ -556,34 +559,18 @@ const QAConsolePage = () => {
     }
   };
 
-  const handleSubmit = async (values) => {
-    // Audit H15：串流進行中禁止再送出，否則第二條 stream 會覆寫 abortRef 與
-    // streamingMsg，兩條 stream 的內容交錯寫進同一個答案、還各存一筆歷史。
-    if (loading) { message.warning("查詢進行中，請稍候或先按停止"); return; }
-    const question = values.question?.trim();
-    if (!question) { message.warning("請輸入問題"); return; }
-    form.setFieldValue("question", "");
+  // 單一輸入框的送出。isFollowup 由 Composer 依後端判斷（且使用者可否決）決定，
+  // 不再靠「按了哪個框」—— 這是 V6 合併輸入框的核心。
+  //
+  // 用 ref 轉一手而不是直接把 handleFollowupSubmit 傳下去：Composer 是 memo 化的，
+  // 每次 render 都換一個新的 onSubmit 會讓 memo 完全失效（串流時每個 token 都重繪）。
+  // 但也不能用 useCallback([]) 直接包 —— 那會鎖住第一次 render 的閉包，
+  // loading 與 qaMode 都變成過期值，切換模式後送出還是走舊模式。
+  const submitRef = useRef(null);
+  const handleComposerSubmit = useCallback((question, opts) => {
+    return submitRef.current?.(question, opts?.isFollowup ?? true);
+  }, []);
 
-    if (qaMode === "agent") { await runAgentStream(question, { isFollowup: false }); return; }
-    if (qaMode === "hybrid") { await runRouteStream(question, { isFollowup: false }); return; }
-
-    const { document_id, folder_ids } = decodeDocScope(values.doc_scope);
-    const payload = {
-      question,
-      top_k: values.top_k ?? 5,
-      classification_id: values.classification_id || null,
-      project_id: values.project_id || null,
-      document_id,
-      folder_ids,
-      // Audit M5：只送 {question, answer}，與追問一致；送整包（含 sources/agentSteps）
-      // 會讓 payload 隨對話暴增，且舊資料缺 answer 時 422。
-      conversation_history: conversationHistory.map((m) => ({ question: m.question, answer: m.answer })),
-      use_ai_fallback: false,
-      skip_ai_understanding: true,
-      conversation_id: activeConvIdRef.current,
-    };
-    await runStream(payload, question);
-  };
 
   const changeQaMode = (mode) => {
     setQaMode(mode);
@@ -591,13 +578,12 @@ const QAConsolePage = () => {
   };
 
   // 文字由 FollowupInput 自己持有並在送出時傳入 —— 上層不再因為打字而重渲染。
-  const handleFollowupSubmit = async (rawQuestion) => {
+  const handleFollowupSubmit = async (rawQuestion, isFollowup = true) => {
     if (loading) { message.warning("查詢進行中，請稍候或先按停止"); return; }  // audit H15
     const question = (rawQuestion || "").trim();
-    if (!question) { message.warning("請輸入追問內容"); return; }
-    // 追問沿用目前模式。
-    if (qaMode === "agent") { await runAgentStream(question, { isFollowup: true }); return; }
-    if (qaMode === "hybrid") { await runRouteStream(question, { isFollowup: true }); return; }
+    if (!question) { message.warning("請輸入問題"); return; }
+    if (qaMode === "agent") { await runAgentStream(question, { isFollowup }); return; }
+    if (qaMode === "hybrid") { await runRouteStream(question, { isFollowup }); return; }
     const currentFormValues = form.getFieldsValue();
     const { document_id, folder_ids } = decodeDocScope(currentFormValues.doc_scope);
     const payload = {
@@ -610,7 +596,9 @@ const QAConsolePage = () => {
       // API 只接受 {question, answer}；送整包訊息物件（含 sources/agentSteps）會 422。
       conversation_history: conversationHistory.map((m) => ({ question: m.question, answer: m.answer })),
       use_ai_fallback: false,
-      skip_ai_understanding: false,
+      // 新問題直接用原文檢索；追問才啟用 AI 理解把省略的主體補回來。
+      // 這個差異原本靠「按了哪個框」決定，現在由判斷結果決定。
+      skip_ai_understanding: !isFollowup,
       conversation_id: activeConvIdRef.current,
     };
     await runStream(payload, question);
@@ -741,6 +729,38 @@ const QAConsolePage = () => {
     setDocScopeExpandedKeys(keys);
   }, [folders, documents]);
 
+  // 每次 render 都把最新的送出函式寫進 ref，Composer 拿到的 onSubmit 才能
+  // 保持同一個參考（memo 有效）又永遠呼叫到最新的閉包。
+  submitRef.current = handleFollowupSubmit;
+
+  const activeConvTitle = useMemo(
+    () => conversations.find((c) => c.id === activeConvId)?.title || "對話",
+    [conversations, activeConvId],
+  );
+
+  // 判斷用的歷史只取最近兩輪：後端的 _history_subject 也只看最後三筆，
+  // 送整包只是讓每次打字都傳一大包 JSON。
+  const historyForCheck = useMemo(
+    () => conversationHistory.slice(-2).map((m) => ({ question: m.question, answer: m.answer })),
+    [conversationHistory],
+  );
+
+  // 目前鎖定的檢索範圍，顯示在輸入框上方 —— 範圍看不見就會重演
+  // 「以為限定了、其實整個資料庫都在查」那個問題。
+  const scopeLabel = useMemo(() => {
+    const sel = currentDocScope;
+    if (!sel) return null;
+    if (sel.startsWith("doc:")) {
+      const d = documents.find((x) => x.id === sel.slice(4));
+      return d ? (d.title.length > 18 ? d.title.slice(0, 18) + "…" : d.title) : "指定文件";
+    }
+    if (sel.startsWith("folder:")) {
+      const f = folders.find((x) => x.id === sel.slice(7));
+      return f ? `資料夾：${f.name}` : "指定資料夾";
+    }
+    return null;
+  }, [currentDocScope, documents, folders]);
+
   // Get all descendant folder IDs (including the folder itself)
   const getDescendantFolderIds = (folderId, allFolders) => {
     const result = [folderId];
@@ -795,100 +815,19 @@ const QAConsolePage = () => {
             />
           </Card>
         </Col>
-        <Col xs={24} lg={7}>
+        <Col xs={24} lg={19}>
           <Card
-            title="查詢設定"
-            style={{ position: "sticky", top: 16 }}
-            extra={
-              <Tooltip title="混合(預設):自動判斷問題類型 — 內容題(怎麼進行/數值)走純 RAG(快、完整);關係題(引用/取代/版本/有哪些子項)走 Agent(KG 工具)。也可手動鎖定純 RAG 或 Agent。">
-                <Space size={4} style={{ cursor: "help" }}>
-                  <Segmented
-                    size="small"
-                    value={qaMode}
-                    onChange={changeQaMode}
-                    options={[
-                      { label: "純RAG", value: "rag" },
-                      { label: "混合", value: "hybrid" },
-                      { label: "Agent", value: "agent" },
-                    ]}
-                  />
-                  <QuestionCircleOutlined style={{ fontSize: 11, color: "#bbb" }} />
-                </Space>
-              </Tooltip>
-            }
+            title={activeConvTitle}
+            extra={conversationHistory.length > 0 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>{conversationHistory.length} 則</Text>
+            ) : null}
+            styles={{ body: { display: "flex", flexDirection: "column",
+                              height: "calc(100vh - 180px)", minHeight: 420, padding: "12px 12px 8px" } }}
           >
-            {qaMode === "hybrid" && (
-              <Alert
-                style={{ marginBottom: 12 }}
-                type="info"
-                showIcon
-                message="混合模式（自動路由）"
-                description="系統自動判定:內容題走純 RAG（快、完整）、關係題走 Agent（跨規範追引用/版本/結構）。每次查詢會標示實際走了哪一邊。"
-              />
-            )}
-            {qaMode === "agent" && (
-              <Alert
-                style={{ marginBottom: 12 }}
-                type="info"
-                showIcon
-                message="Agent 模式已啟用"
-                description="會自動跨規範追引用、查版本鏈,單次查詢較慢(3-15s),適合「我這產品要符合什麼?」這類綜合性問題。"
-              />
-            )}
-            <Form form={form} layout="vertical" initialValues={{ top_k: 5 }} onFinish={handleSubmit}>
-              <Form.Item name="question" label="請輸入問題" rules={[{ required: true, message: "請輸入想查詢的問題" }]}>
-                <Input.TextArea rows={4} placeholder="例：某規範流程？或追問上一題關鍵數值" allowClear onPressEnter={(e) => { if (e.ctrlKey || e.metaKey) { form.submit(); } }} />
-              </Form.Item>
-              <Form.Item name="classification_id" label="分類">
-                <Select allowClear showSearch placeholder="選擇分類（可留空）" options={classificationOptions} optionFilterProp="label" />
-              </Form.Item>
-              <Form.Item name="project_id" label="專案">
-                <Select allowClear showSearch placeholder="選擇專案（可留空）" options={projectSelectOptions} optionFilterProp="label" />
-              </Form.Item>
-              <Form.Item name="doc_scope" label="資料夾 / 文件">
-                <TreeSelect
-                  allowClear
-                  showSearch
-                  treeNodeFilterProp="title"
-                  placeholder="選擇資料夾或特定文件（可留空）"
-                  treeData={documentTreeData}
-                  treeExpandedKeys={docScopeExpandedKeys}
-                  onTreeExpand={setDocScopeExpandedKeys}
-                  listHeight={400}
-                  getPopupContainer={() => document.body}
-                  style={{ width: "100%" }}
-                />
-              </Form.Item>
-              <Form.Item name="top_k" label="來源筆數">
-                <InputNumber min={1} max={10} style={{ width: "100%" }} />
-              </Form.Item>
-              <Form.Item>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  <Button type="primary" htmlType="submit" loading={loading} icon={<SendOutlined />} style={{ flex: "1 1 auto" }}>
-                    送出查詢 (Ctrl+Enter)
-                  </Button>
-                  {loading && (
-                    <Button danger icon={<StopOutlined />} onClick={stopInFlight}>
-                      停止
-                    </Button>
-                  )}
-                  {conversationHistory.length > 0 && (
-                    <Button onClick={clearHistory} icon={<DeleteOutlined />} danger>
-                      清除歷史
-                    </Button>
-                  )}
-                </div>
-              </Form.Item>
-              <Alert message="提示" description="此為新問題輸入，問題將直接用於文字檢索；追問會使用 AI 理解功能，請使用右側下方的追問輸入。" type="info" showIcon icon={<QuestionCircleOutlined />} />
-            </Form>
-          </Card>
-        </Col>
-        <Col xs={24} lg={12}>
-          <Card title={`對話記錄 (${conversationHistory.length})`}>
             {conversationHistory.length === 0 && !streamingMsg ? (
-              <Empty description="尚未開始對話，請先在左側輸入問題以開始查詢" style={{ padding: "48px 0" }} />
+              <Empty description="這條對話還沒有內容，從下方輸入問題開始" style={{ margin: "auto" }} />
             ) : (
-              <div style={{ maxHeight: "calc(100vh - 200px)", overflowY: "auto", padding: "0 8px" }}>
+              <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 8px" }}>
                 {/* 已完成的對話記錄。memo 化：串流每收到一段文字就更新上層 state，
                     若歷史訊息跟著重繪，上百則的 ReactMarkdown 會讓整頁卡頓。 */}
                 {conversationHistory.map((msg, index) => (
@@ -945,12 +884,82 @@ const QAConsolePage = () => {
               </div>
             )}
 
-            {(conversationHistory.length > 0 || streamingMsg) && (
-              <FollowupInput loading={loading} onSubmit={handleFollowupSubmit} onStop={stopInFlight} />
-            )}
+            {/* 單一輸入框：新問題與追問合併。是否延續由後端判斷並顯示成
+                可按掉的標籤，不再靠「你點哪個框」決定。 */}
+            <Composer
+              loading={loading}
+              qaMode={qaMode}
+              onModeChange={changeQaMode}
+              onSubmit={handleComposerSubmit}
+              onStop={stopInFlight}
+              onOpenSettings={() => setSettingsOpen(true)}
+              scopeLabel={scopeLabel}
+              hasHistory={conversationHistory.length > 0}
+              historyForCheck={historyForCheck}
+            />
           </Card>
         </Col>
       </Row>
+
+      {/* 查詢設定抽屜。模式選擇刻意不放進來 —— 三種模式的耗時差很大
+          （Agent 單次 3–15 秒），藏起來會讓人搞不清楚為什麼有時很慢，
+          所以它留在輸入框上方。 */}
+      <Drawer
+        title="查詢設定"
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        width={340}
+        destroyOnHidden={false}
+      >
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={{ top_k: 5 }}
+          onValuesChange={(changed) => {
+            if ("doc_scope" in changed) setCurrentDocScope(changed.doc_scope ?? null);
+          }}
+        >
+          <Form.Item name="classification_id" label="分類">
+            <Select allowClear showSearch placeholder="選擇分類（可留空）" options={classificationOptions} optionFilterProp="label" />
+          </Form.Item>
+          <Form.Item name="project_id" label="專案">
+            <Select allowClear showSearch placeholder="選擇專案（可留空）" options={projectSelectOptions} optionFilterProp="label" />
+          </Form.Item>
+          <Form.Item name="doc_scope" label="資料夾 / 文件">
+            <TreeSelect
+              allowClear
+              showSearch
+              treeNodeFilterProp="title"
+              placeholder="選擇資料夾或特定文件（可留空）"
+              treeData={documentTreeData}
+              treeExpandedKeys={docScopeExpandedKeys}
+              onTreeExpand={setDocScopeExpandedKeys}
+              listHeight={400}
+              getPopupContainer={() => document.body}
+              style={{ width: "100%" }}
+            />
+          </Form.Item>
+          <Form.Item name="top_k" label="來源筆數">
+            <InputNumber min={1} max={10} style={{ width: "100%" }} />
+          </Form.Item>
+        </Form>
+
+        {conversationHistory.length > 0 && (
+          <Button onClick={() => { setSettingsOpen(false); clearHistory(); }} icon={<DeleteOutlined />} danger block>
+            刪除目前這條對話
+          </Button>
+        )}
+
+        <Alert
+          style={{ marginTop: 16 }}
+          type="info"
+          showIcon
+          icon={<QuestionCircleOutlined />}
+          message="關於模式"
+          description="混合（預設）會自動判斷：內容題走純 RAG（快），關係／列舉題走 Agent（會跨規範追引用，較慢）。模式選擇在輸入框上方。"
+        />
+      </Drawer>
+
       {/* 儲存筆記 Modal */}
       <Modal
         title={<Space><SaveOutlined />儲存筆記至文件</Space>}
