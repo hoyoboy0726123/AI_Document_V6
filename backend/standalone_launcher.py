@@ -5,6 +5,7 @@ import webbrowser
 from multiprocessing import freeze_support
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.main import app as api_app
 
 # 核心路徑雙軌制 (2026 安全版)
@@ -44,9 +45,25 @@ app = api_app
 routes_to_keep = [r for r in app.routes if getattr(r, "path", None) != "/"]
 app.routes[:] = routes_to_keep
 
+# SPA fallback：React Router 的深層路由（/documents、/qa…）在磁碟上沒有對應檔案，
+# 原本的 StaticFiles 會直接回 404 —— 使用者一按重新整理或用書籤進站就壞掉。
+# 只對「沒有副檔名」的路徑回退到 index.html，讓前端路由自己接手；
+# 缺少的 .js/.css/.png 仍然正常回 404，不會被 index.html 蓋掉而難以除錯。
+# 注意：StaticFiles 找不到檔案時是「丟出 HTTPException」而非回傳 404 response，
+# 所以這裡必須攔例外，判斷狀態碼是攔不到的。
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and not os.path.splitext(path)[1]:
+                return await super().get_response("index.html", scope)
+            raise
+
+
 # 掛載前端靜態檔案到根目錄
 if os.path.exists(static_dir):
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")
 else:
     @app.get("/")
     def missing_frontend():
