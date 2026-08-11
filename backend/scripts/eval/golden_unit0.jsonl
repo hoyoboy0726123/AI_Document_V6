@@ -6,7 +6,7 @@
 {"id": "u06", "kind": "exact", "q": "新版原物料料號總共幾碼", "gold": ["14"], "note": "第7頁：新原物料編碼原則『兩碼大類+三碼次分類+-』，共14碼含-"}
 {"id": "u07", "kind": "coverage", "q": "新舊原物料編碼原則有什麼差異", "gold": ["12", "14", "G"], "note": "第7頁：舊 12 碼含 G、新 14 碼含 -"}
 {"id": "u08", "kind": "coverage", "q": "料號的 AA、BBB、CC 各代表什麼", "gold": ["大類", "次分類", "流水碼"], "note": "第7頁說明：AA=原物料大類 BBB=原物料次分類 CC...=流水碼"}
-{"id": "u09", "kind": "coverage", "q": "原物料依功能分成哪幾類", "gold": ["電子零件", "機構件", "Key parts", "Key module", "Adapter", "Power cord", "Accessory", "Packing"], "note": "原物料介紹的九宮格：(1)EE 電子零件 …(9)Packing"}
+{"id": "u09", "kind": "coverage", "q": "原物料介紹裡 EE、ME、Key parts、Key module 分別指什麼", "gold": ["電子零件", "機構件", "關鍵零組件", "關鍵模組"], "note": "原物料介紹九宮格的前四格。第一版問「原物料依功能分成哪幾類」有歧義 —— 系統答『大類』分類（CPU/CHIPSET…）其實也算一種分類，得 1/8 是題目的錯不是系統的錯"}
 {"id": "u10", "kind": "coverage", "q": "筆記型電腦拆解後有哪些主要組件", "gold": ["LCD", "Key board", "Touch pad", "ODD", "HDD", "Speaker", "Thermal module", "Battery", "Memory"], "note": "NB拆解說明頁"}
 {"id": "u11", "kind": "absent", "q": "這份文件規定的產品保固年限是幾年", "note": "語料中『保固』『年限』出現 0 次 —— 正確行為是誠實說查不到"}
 {"id": "u12", "kind": "absent", "q": "鹽霧測試的箱體溫度要維持在幾度", "note": "屬 MIL-STD 領域，本語料中『鹽霧』『箱體溫度』出現 0 次"}
