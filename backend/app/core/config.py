@@ -86,6 +86,23 @@ class Settings(BaseSettings):
     # 部署的 qwen3-embedding 上下文遠大於此，設 2000 可完整涵蓋 1800 字 chunk。
     # 若改用 bge-large 等 512-token 模型，請在 .env 把此值調回 ~450。
     EMBEDDING_MAX_CHARS: int = 2000
+    # 嵌入模型釘在 CPU，把顯卡讓給生成模型獨佔。
+    #
+    # RAG 每一輪都是「先嵌入問句、再生成答案」。小顯存機器上兩者塞不下就會
+    # 互相驅逐 —— 實測 8GB 卡跑 qwen3:8b @ num_ctx=8192 要 6.2GB，連 0.66GB
+    # 的 bge-m3 都擠不進去，`ollama ps` 可見每題發生兩次驅逐（嵌入把 LLM 踢掉、
+    # 生成再把嵌入踢掉），等於每題重載一次 6.2GB 的生成模型。
+    #
+    # 判斷依據是「重載成本」而非模型本身的推理速度：嵌入只處理一個短問句，
+    # 工作量小，在 CPU 上暖機後約 340ms；生成模型重載一次卻要 12~20 秒。
+    #
+    # golden set 驗證（scripts/eval/run_eval_unit0.py，13 題）：
+    #   釘 CPU  總分 0.667  耗時 276.8s
+    #   走 GPU  總分 0.667  耗時 359.5s
+    # 逐題分數完全相同、答案長度幾乎一致 —— 純速度改善，每題平均省 6.4 秒。
+    #
+    # 24GB 以上、兩個模型能同時常駐的機器可設為 False。
+    EMBEDDING_ON_CPU: bool = True
     # VL 視覺模型(目前只支援 ollama;Gemini vision 走 LLM_PROVIDER 那條)
     VISION_PROVIDER: str = "ollama"
     VISION_MODEL: str | None = None            # 覆寫 OLLAMA_VISION_MODEL;留空則沿用

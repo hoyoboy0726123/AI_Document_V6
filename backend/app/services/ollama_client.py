@@ -844,6 +844,13 @@ class OllamaClient:
         if dimensions:
             payload["dimensions"] = dimensions
 
+        # /api/embed 原本完全沒帶 options，於是嵌入模型一律搶 GPU、把生成模型
+        # 擠出顯卡（見 settings.EMBEDDING_ON_CPU 的說明與實測數字）。
+        # 這裡不共用 _default_options()：那裡的 num_ctx / temperature / seed
+        # 對嵌入沒有意義。
+        if getattr(_settings, "EMBEDDING_ON_CPU", True):
+            payload["options"] = {"num_gpu": 0}
+
         data = self._post("/api/embed", payload)
         embeddings = data.get("embeddings")
         if not embeddings:
