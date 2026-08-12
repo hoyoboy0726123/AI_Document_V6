@@ -1270,12 +1270,26 @@ def route_mode(question: str) -> str:
 
 
 def run_rag_only(db: Session, question: str,
-                 conversation_history: Optional[List[Dict[str, Any]]] = None):
-    """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。"""
+                 conversation_history: Optional[List[Dict[str, Any]]] = None,
+                 out_meta: Optional[Dict[str, Any]] = None):
+    """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。
+
+    out_meta 若有傳入，會被填入查詢改寫的結果（optimized_query / rewritten / source）。
+    用「填 dict」而不是多回一個值，是為了不動到本函式的四個 return —— 那些是主體
+    一致性查核與低信心兜底的分支，動它們風險不成比例。
+
+    為什麼要把改寫結果交出去：改寫是無條件的，使用者卻看不到系統實際拿去查的
+    字串是什麼。純 RAG 那條路早就會顯示「AI 理解：xxx」，混合模式（預設模式）
+    反而沒有 —— 同樣的機制，使用者在預設路徑上看不到。
+    """
     # 查詢改寫（單一入口）。承接「鹽霧測試的箱體溫度」之後問「那濕度呢」，
     # 沒有改寫就會撈回濕度測試的內容。
     _resolved = resolve_query(question, conversation_history)
     question = _resolved["query"]
+    if out_meta is not None:
+        out_meta["optimized_query"] = _resolved.get("query")
+        out_meta["rewritten"] = bool(_resolved.get("rewritten"))
+        out_meta["rewrite_source"] = _resolved.get("source")
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
 
     subject_caution = ""

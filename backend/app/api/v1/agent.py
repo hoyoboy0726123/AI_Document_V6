@@ -141,8 +141,17 @@ def agent_route(
                     else:
                         yield _sse(etype or "info", evt)
             else:
-                final_text, final_sources = agent.run_rag_only(db, question, conversation_history=history)
-                yield _sse("final", {"text": final_text, "sources": final_sources})
+                # meta 會被填入查詢改寫的結果，交給前端顯示「AI 理解：xxx」。
+                # 純 RAG 端點早就有這個顯示，混合模式（預設）反而沒有。
+                meta: Dict[str, Any] = {}
+                final_text, final_sources = agent.run_rag_only(
+                    db, question, conversation_history=history, out_meta=meta)
+                yield _sse("final", {
+                    "text": final_text,
+                    "sources": final_sources,
+                    "optimized_query": meta.get("optimized_query"),
+                    "rewritten": meta.get("rewritten", False),
+                })
 
             saved = conversations.append_message(
                 db, user_id, conversation_id,

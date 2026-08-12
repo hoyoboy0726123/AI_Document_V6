@@ -472,7 +472,15 @@ const QAConsolePage = () => {
           setStreaming((prev) => prev ? { ...prev, agentSteps: [...(prev.agentSteps || []), { event: eventName, ...data }] } : null);
         },
         onFinal: (data) => {
-          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
+          // 混合模式先前不回傳 optimized_query，於是「AI 理解：xxx」在預設模式下
+          // 永遠不顯示 —— 使用者看不到系統實際拿去查的字串是什麼。
+          setStreaming((prev) => prev ? {
+            ...prev,
+            answer: data.text || "",
+            sources: data.sources || [],
+            optimized_query: data.rewritten ? (data.optimized_query || null) : null,
+            thinkingDone: true,
+          } : null);
         },
         onDone: (doneEvt) => {
           syncConversationId(doneEvt);
@@ -480,7 +488,8 @@ const QAConsolePage = () => {
           if (prev) {
             const newMsg = {
               question: prev.question, answer: prev.answer, sources: prev.sources || [],
-              is_followup: isFollowup, optimized_query: null, thinking: "", suggested_questions: [],
+              is_followup: isFollowup, optimized_query: prev.optimized_query ?? null,
+              thinking: "", suggested_questions: [],
               used_ai_fallback: false, agentMode: prev.routedMode === "agent", hybrid: true,
               routedMode: prev.routedMode, agentSteps: prev.agentSteps || [], timestamp: new Date().toISOString(),
             };
@@ -567,11 +576,14 @@ const QAConsolePage = () => {
   // 但也不能用 useCallback([]) 直接包 —— 那會鎖住第一次 render 的閉包，
   // loading 與 qaMode 都變成過期值，切換模式後送出還是走舊模式。
   const submitRef = useRef(null);
-  const handleComposerSubmit = useCallback((question) => {
-    // 一律當作「同一條對話的延續」送出：完整歷史交給後端，由 resolve_query
-    // 決定要不要改寫。前端不再自己判斷 —— 分類有門檻、門檻會錯，
-    // 而使用者不該為了問問題去理解這個機制。開新主題請按「＋ 新對話」。
-    return submitRef.current?.(question, true);
+  const handleComposerSubmit = useCallback((question, isFollowup) => {
+    // 預設仍是「同一條對話的延續」：完整歷史交給後端，由 resolve_query 決定
+    // 怎麼改寫。前端不自己做分類判斷 —— 分類有門檻、門檻會錯。
+    //
+    // 但 isFollowup 改由 Composer 傳入而非寫死 true，因為：
+    //   1. 寫死 true 會讓「新對話的第一題」也被標成追問（沒有前文可承接）
+    //   2. 使用者要能覆寫 —— 改寫無條件執行，偶爾會把新主題誤接到舊主題上
+    return submitRef.current?.(question, Boolean(isFollowup));
   }, []);
 
 
