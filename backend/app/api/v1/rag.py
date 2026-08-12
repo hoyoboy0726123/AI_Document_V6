@@ -624,6 +624,31 @@ def create_conversation(
     return conversations.to_summary(row)
 
 
+@router.post("/conversations/batch-delete")
+def batch_delete_conversations(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """批次刪除對話（側邊欄多選）。
+
+    用 POST 而非 DELETE：DELETE 帶 body 在部分 proxy/客戶端上不可靠。
+    逐一走 get_owned 的擁有者過濾 —— 清單裡混入別人的 id（或已被刪的）
+    一律靜默跳過，回傳實際刪除數。
+    """
+    ids = payload.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="缺少 ids")
+    deleted = 0
+    for cid in ids[:500]:                     # 安全上限，避免惡意超長清單
+        row = conversations.get_owned(db, current_user.id, str(cid))
+        if row:
+            db.delete(row)
+            deleted += 1
+    db.commit()
+    return {"deleted": deleted}
+
+
 @router.get("/conversations/{conversation_id}")
 def get_conversation_by_id(
     conversation_id: str,

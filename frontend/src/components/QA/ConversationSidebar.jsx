@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import { Button, Dropdown, Empty, Input, Modal, Tooltip, Typography } from "antd";
+import { Button, Checkbox, Dropdown, Empty, Input, Modal, Tooltip, Typography } from "antd";
 import {
   PlusOutlined,
   MoreOutlined,
@@ -8,6 +8,7 @@ import {
   EditOutlined,
   DeleteOutlined,
   MessageOutlined,
+  CheckSquareOutlined,
 } from "@ant-design/icons";
 
 const { Text } = Typography;
@@ -30,8 +31,45 @@ const ConversationSidebar = memo(function ConversationSidebar({
   onRename,
   onTogglePin,
   onDelete,
+  onBatchDelete,
 }) {
   const [renaming, setRenaming] = useState(null); // { id, title }
+  // 多選刪除模式。選取集合放本地就好 —— 它是純 UI 暫態，退出模式即消失，
+  // 提到父層只會讓串流時的重繪雪上加霜（本元件 memo 化的初衷）。
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelected(new Set());
+  };
+
+  const toggleOne = (id) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const allSelected = conversations.length > 0 && selected.size === conversations.length;
+
+  const confirmBatchDelete = () => {
+    const ids = [...selected];
+    const totalMsgs = conversations
+      .filter((c) => selected.has(c.id))
+      .reduce((sum, c) => sum + (c.message_count || 0), 0);
+    Modal.confirm({
+      title: `刪除 ${ids.length} 條對話？`,
+      content: `共 ${totalMsgs} 則訊息，刪除後無法復原。`,
+      okText: "刪除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        await onBatchDelete(ids);   // 失敗會 throw：Modal 停留、選取保留，可重試
+        exitSelectMode();
+      },
+    });
+  };
 
   const confirmDelete = (item) => {
     Modal.confirm({
@@ -53,15 +91,42 @@ const ConversationSidebar = memo(function ConversationSidebar({
 
   return (
     <div className="conv-sidebar">
-      <Button
-        type="default"
-        icon={<PlusOutlined />}
-        block
-        onClick={onCreate}
-        style={{ marginBottom: 12 }}
-      >
-        新對話
-      </Button>
+      {!selectMode ? (
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <Button
+            type="default"
+            icon={<PlusOutlined />}
+            style={{ flex: 1 }}
+            onClick={onCreate}
+          >
+            新對話
+          </Button>
+          <Tooltip title="選取多條對話一次刪除">
+            <Button
+              icon={<CheckSquareOutlined />}
+              onClick={() => setSelectMode(true)}
+              disabled={conversations.length === 0}
+            />
+          </Tooltip>
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <Checkbox
+            checked={allSelected}
+            indeterminate={selected.size > 0 && !allSelected}
+            onChange={() =>
+              setSelected(allSelected ? new Set() : new Set(conversations.map((c) => c.id)))
+            }
+          >
+            全選
+          </Checkbox>
+          <span style={{ flex: 1, fontSize: 12, color: "#8c8c8c" }}>已選 {selected.size}</span>
+          <Button size="small" danger disabled={selected.size === 0} onClick={confirmBatchDelete}>
+            刪除
+          </Button>
+          <Button size="small" onClick={exitSelectMode}>取消</Button>
+        </div>
+      )}
 
       {conversations.length === 0 && !loading && (
         <Empty
@@ -97,13 +162,23 @@ const ConversationSidebar = memo(function ConversationSidebar({
             <div
               key={item.id}
               className={`conv-item${active ? " conv-item-active" : ""}`}
-              onClick={() => !active && onSelect(item.id)}
+              onClick={() => (selectMode ? toggleOne(item.id) : (!active && onSelect(item.id)))}
               role="button"
               tabIndex={0}
-              onKeyDown={(e) => { if (e.key === "Enter" && !active) onSelect(item.id); }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                if (selectMode) toggleOne(item.id);
+                else if (!active) onSelect(item.id);
+              }}
             >
               <span className="conv-icon">
-                {item.is_pinned ? <PushpinFilled /> : <MessageOutlined />}
+                {selectMode ? (
+                  // 純指示器：點擊由整列的 onClick 處理，checkbox 自己不攔事件，
+                  // 否則一次點擊會被列與框各切換一次、等於沒選到
+                  <Checkbox checked={selected.has(item.id)} style={{ pointerEvents: "none" }} />
+                ) : (
+                  item.is_pinned ? <PushpinFilled /> : <MessageOutlined />
+                )}
               </span>
               <span className="conv-text">
                 <Tooltip title={item.preview || item.title} placement="right">
@@ -111,7 +186,7 @@ const ConversationSidebar = memo(function ConversationSidebar({
                 </Tooltip>
                 <span className="conv-meta">{item.message_count} 則</span>
               </span>
-              <Dropdown
+              {!selectMode && <Dropdown
                 trigger={["click"]}
                 placement="bottomRight"
                 menu={{
@@ -141,7 +216,7 @@ const ConversationSidebar = memo(function ConversationSidebar({
                 >
                   <MoreOutlined />
                 </span>
-              </Dropdown>
+              </Dropdown>}
             </div>
           );
         })}

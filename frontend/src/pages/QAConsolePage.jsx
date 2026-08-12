@@ -236,6 +236,22 @@ const QAConsolePage = () => {
     }
   }, [loadConversations, openConversation]);
 
+  // 批次刪除（側邊欄多選）。失敗時 throw —— 側邊欄靠它決定要不要保留選取狀態，
+  // 靜默吞掉的話使用者會以為刪成功了、選取也被清掉，無從重試。
+  const handleBatchDeleteConversations = useCallback(async (ids) => {
+    try {
+      const resp = await apiClient.post("rag/conversations/batch-delete", { ids });
+      const wasActive = ids.includes(activeConvIdRef.current);
+      if (wasActive) activeConvIdRef.current = null;
+      const next = await loadConversations();
+      if (wasActive) await openConversation(next);
+      message.success(`已刪除 ${resp.data?.deleted ?? ids.length} 條對話`);
+    } catch (err) {
+      message.error("批次刪除失敗");
+      throw err;
+    }
+  }, [loadConversations, openConversation]);
+
   // 這裡原本有一個「conversationHistory 一變就 PUT 整包」的自動存檔。
   // 多對話串下那是有害的：PUT 打的是「最近更新的那一條」，切到別條對話
   // 再問一題就會把它整包覆蓋掉。三種查詢模式現在都在後端各自 append
@@ -824,6 +840,7 @@ const QAConsolePage = () => {
               onRename={handleRenameConversation}
               onTogglePin={handleTogglePin}
               onDelete={handleDeleteConversation}
+              onBatchDelete={handleBatchDeleteConversations}
             />
           </Card>
         </Col>
