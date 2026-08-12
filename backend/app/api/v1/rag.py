@@ -585,9 +585,16 @@ def analyze_pdf_pages_stream(
 # ===== Per-user conversation history =====
 
 @router.get("/config")
-def get_rag_config(current_user=Depends(get_current_user)):
-    """回傳前端需要的 RAG 相關設定值"""
-    return {"max_pdf_analysis_pages": settings.MAX_PDF_ANALYSIS_PAGES}
+def get_rag_config(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """回傳前端需要的 RAG 相關設定值（含 UI 顯示旗標，全體使用者可讀）"""
+    show_kg = SystemConfigService(db).get_config("ui.show_knowledge_graph")
+    return {
+        "max_pdf_analysis_pages": settings.MAX_PDF_ANALYSIS_PAGES,
+        # 知識圖譜頁面的顯示開關（admin 可在管理介面切換）。
+        # 只影響側邊欄入口的顯示 —— KG 抽取照常於 ingest 後在背景執行，
+        # 資料持續累積在 kg_entities / kg_relations，重新開啟即可看到全部。
+        "show_knowledge_graph": True if show_kg is None else bool(show_kg),
+    }
 
 
 # ── 多對話串（V6）──────────────────────────────────────────

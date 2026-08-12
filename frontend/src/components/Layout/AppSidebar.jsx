@@ -1,23 +1,39 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Layout, Menu } from "antd";
 import { FileTextOutlined, AppstoreOutlined, BookOutlined, SettingOutlined, RobotOutlined, ThunderboltOutlined, HeartOutlined, NodeIndexOutlined } from "@ant-design/icons";
 import { useLocation, useNavigate } from "react-router-dom";
 import FolderTree from "../Folders/FolderTree";
 import useAuthStore from "../../stores/authStore";
+import apiClient from "../../services/api";
 
 const { Sider } = Layout;
+
+// 模組層快取：側邊欄在每次換頁都會重新掛載，不快取的話每頁都打一次 API。
+// null = 尚未載入（先照預設顯示，載到 false 才收起 —— 對「有開」的多數
+// 情況零閃爍；對「有關」的情況只在首次載入短暫可見，可接受）。
+let _showKgCache = null;
 
 const AppSidebar = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuthStore();
   const isAdmin = user?.role === "admin";
+  const [showKg, setShowKg] = useState(_showKgCache !== false);
+
+  useEffect(() => {
+    if (_showKgCache !== null) return;          // 已載過就不再打
+    apiClient.get("/rag/config").then((resp) => {
+      _showKgCache = resp.data?.show_knowledge_graph !== false;
+      setShowKg(_showKgCache);
+    }).catch(() => { /* 讀不到就維持預設顯示 */ });
+  }, []);
 
   const menuItems = [
     { key: "/documents", icon: <FileTextOutlined />, label: "文件列表" },
     ...(isAdmin ? [{ key: "/documents/new", icon: <AppstoreOutlined />, label: "建立文件" }] : []),
     { key: "/qa", icon: <RobotOutlined />, label: "RAG智慧問答" },
-    { key: "/knowledge-graph", icon: <NodeIndexOutlined />, label: "知識圖譜" },
+    // 隱藏只收起入口，KG 抽取照常在背景累積資料（見 admin ui-config 端點）
+    ...(showKg ? [{ key: "/knowledge-graph", icon: <NodeIndexOutlined />, label: "知識圖譜" }] : []),
     { key: "/notebook", icon: <BookOutlined />, label: "我的筆記本" },
     ...(isAdmin ? [
       { key: "/admin/metadata", icon: <SettingOutlined />, label: "管理介面" },

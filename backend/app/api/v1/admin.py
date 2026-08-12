@@ -803,6 +803,41 @@ def update_llm_concurrency(
     return {"ok": True, "max_concurrency": value}
 
 
+@router.get("/ui-config")
+@router.get("/ui-config/")
+def get_ui_config(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """UI 顯示旗標（目前只有知識圖譜頁面開關）。"""
+    _ = current_admin
+    show_kg = SystemConfigService(db).get_config("ui.show_knowledge_graph")
+    return {"show_knowledge_graph": True if show_kg is None else bool(show_kg)}
+
+
+@router.put("/ui-config")
+@router.put("/ui-config/")
+def update_ui_config(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """切換 UI 顯示旗標。
+
+    「隱藏知識圖譜」只收起側邊欄入口，供內容用不到 KG 的單位保持介面乾淨。
+    抽取行為完全不受影響（KG_AUTO_EXTRACT 照常於 ingest 後在背景執行），
+    資料持續累積 —— 日後匯入含規範代號的文件後重新打開，全部看得到。
+    """
+    _ = current_admin
+    if "show_knowledge_graph" not in payload:
+        raise HTTPException(status_code=400, detail="缺少 show_knowledge_graph")
+    value = bool(payload["show_knowledge_graph"])
+    SystemConfigService(db).set_config(
+        "ui.show_knowledge_graph", value, "側邊欄是否顯示知識圖譜頁面")
+    logger.info("知識圖譜頁面顯示 = %s", value)
+    return {"ok": True, "show_knowledge_graph": value}
+
+
 @router.post("/reset-inference")
 @router.post("/reset-inference/")
 def reset_inference_engine(

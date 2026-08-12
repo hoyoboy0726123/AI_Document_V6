@@ -33,6 +33,7 @@ import {
   ToolOutlined,
   EyeOutlined,
   FileSearchOutlined,
+  NodeIndexOutlined,
 } from "@ant-design/icons";
 import apiClient from "../../services/api";
 
@@ -265,6 +266,33 @@ const SystemSettings = () => {
     });
   };
 
+  const [showKg, setShowKg] = useState(true);
+  const [savingUiConfig, setSavingUiConfig] = useState(false);
+
+  const fetchUiConfig = async () => {
+    try {
+      const resp = await apiClient.get("admin/ui-config");
+      setShowKg(resp.data.show_knowledge_graph !== false);
+    } catch (e) {
+      // silent
+    }
+  };
+
+  const handleToggleKg = async (checked) => {
+    setSavingUiConfig(true);
+    try {
+      await apiClient.put("admin/ui-config", { show_knowledge_graph: checked });
+      setShowKg(checked);
+      message.success(checked
+        ? "已顯示知識圖譜。側邊欄入口將在下次載入頁面時出現。"
+        : "已隱藏知識圖譜入口。KG 抽取仍在背景執行、資料持續累積，隨時可再打開。");
+    } catch (error) {
+      message.error(error.response?.data?.detail ?? "儲存失敗");
+    } finally {
+      setSavingUiConfig(false);
+    }
+  };
+
   const fetchLlmConcurrency = async () => {
     try {
       const resp = await apiClient.get("admin/llm-concurrency");
@@ -316,6 +344,7 @@ const SystemSettings = () => {
     fetchLlmProviderConfig();
     fetchOcrConfig();
     fetchLlmConcurrency();
+    fetchUiConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1006,6 +1035,33 @@ const SystemSettings = () => {
             </Text>
           </div>
         </Form>
+      </Card>
+
+      <Card
+        title={
+          <span>
+            <NodeIndexOutlined style={{ marginRight: 8 }} />
+            介面顯示
+          </span>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Space align="center">
+          <Switch
+            checked={showKg}
+            loading={savingUiConfig}
+            onChange={handleToggleKg}
+          />
+          <Text>側邊欄顯示「知識圖譜」頁面</Text>
+        </Space>
+        <div style={{ marginTop: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            知識圖譜針對規範類文件（ISO / IEC / MIL-STD / IEEE…）自動抽取引用與取代關係；
+            一般商管或教育訓練文件抽不出內容，圖譜會是空的。隱藏只收起入口 ——
+            <strong>抽取仍在每次文件匯入後自動執行、資料持續累積</strong>，
+            日後匯入規範文件再打開，全部看得到。
+          </Text>
+        </div>
       </Card>
 
       <Card title="向量管理">
