@@ -100,6 +100,8 @@ const SystemSettings = () => {
   const [testingLlm, setTestingLlm] = useState(false);
 
   const [ocrForm] = Form.useForm();
+  const [concurrencyForm] = Form.useForm();
+  const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [savingOcr, setSavingOcr] = useState(false);
 
   // 載入系統配置
@@ -225,6 +227,34 @@ const SystemSettings = () => {
     }
   };
 
+  const fetchLlmConcurrency = async () => {
+    try {
+      const resp = await apiClient.get("admin/llm-concurrency");
+      concurrencyForm.setFieldsValue({ max_concurrency: resp.data.max_concurrency ?? 1 });
+    } catch (e) {
+      // silent — admin-only or backend unreachable
+    }
+  };
+
+  const handleSaveLlmConcurrency = async (values) => {
+    setSavingConcurrency(true);
+    try {
+      await apiClient.put("admin/llm-concurrency", {
+        max_concurrency: values.max_concurrency,
+      });
+      message.success(
+        values.max_concurrency === 1
+          ? "已設為序列化：同時只允許一個 LLM 請求，後來者排隊"
+          : `已允許 ${values.max_concurrency} 個 LLM 請求同時進行`
+      );
+      await fetchLlmConcurrency();
+    } catch (error) {
+      message.error(error.response?.data?.detail ?? "儲存失敗");
+    } finally {
+      setSavingConcurrency(false);
+    }
+  };
+
   const handleSaveOcrConfig = async (values) => {
     setSavingOcr(true);
     try {
@@ -247,6 +277,7 @@ const SystemSettings = () => {
     fetchConfig();
     fetchLlmProviderConfig();
     fetchOcrConfig();
+    fetchLlmConcurrency();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -859,6 +890,70 @@ const SystemSettings = () => {
       </Card>
 
       {/* 向量管理 */}
+      <Card
+        title={
+          <span>
+            <ThunderboltOutlined style={{ marginRight: 8 }} />
+            LLM 併發控制（立即生效）
+          </span>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Alert
+          message="小顯存機器請保持「1（序列化）」"
+          description={
+            <div>
+              <p>
+                兩個生成請求同時進行時，Ollama 會改變模型的 GPU/CPU 層切分。浮點運算路徑一變，
+                第一個 token 的選擇就可能翻轉，整段答案隨之發散 ——
+                <strong>即使溫度與亂數種子都固定也一樣</strong>，因為輸入雖同、運算路徑已不同。
+              </p>
+              <p>
+                <strong>實測後果不是「偶爾答錯」，而是「掉進另一個穩定點並持續」：</strong>
+                同一個問題原本回 1,435 字含 3 張表格，被並行干擾後變成 855 字、0 張表格，
+                之後每次都一樣，看起來像系統本來就是那樣。必須重啟服務並卸載模型才會恢復。
+              </p>
+              <p>
+                序列化的代價是併發時要排隊，但小顯存機器本來就沒有真正的併發能力 ——
+                兩個請求並行只會一起變慢又互相污染。<strong>換用能讓模型完全常駐 GPU
+                （不溢位到 CPU）的顯卡之後，才建議調高。</strong>
+              </p>
+            </div>
+          }
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+
+        <Form
+          form={concurrencyForm}
+          layout="vertical"
+          onFinish={handleSaveLlmConcurrency}
+          initialValues={{ max_concurrency: 1 }}
+        >
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item
+                label="同時允許的 LLM 請求數"
+                name="max_concurrency"
+                rules={[{ required: true, message: '請輸入 1 到 8 的整數' }]}
+                extra="1 = 完全序列化（建議）。超過的請求會排隊等待，不會失敗。"
+              >
+                <InputNumber min={1} max={8} step={1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Button
+            type="primary"
+            htmlType="submit"
+            icon={<SaveOutlined />}
+            loading={savingConcurrency}
+          >
+            儲存
+          </Button>
+        </Form>
+      </Card>
+
       <Card title="向量管理">
         <Alert
           message="刪除所有向量值說明"

@@ -34,6 +34,22 @@ class Settings(BaseSettings):
     OLLAMA_EMBED_MODEL: str = "quentinz/bge-large-zh-v1.5:latest"
     OLLAMA_KEEP_ALIVE: str = "5m"
     OLLAMA_TIMEOUT: int = 120  # seconds
+    # 同時允許幾個 LLM 請求進 Ollama（1 = 完全序列化，後來者排隊）。
+    #
+    # 為什麼預設 1：小顯存機器上兩個生成請求重疊時，Ollama 會改變模型的
+    # GPU/CPU 層切分比例（實測 8GB 卡上模型本來就會溢位到 CPU）。CPU 與 GPU
+    # 的浮點運算有細微差異，第一個 token 的選擇一旦翻轉，整段輸出就發散 ——
+    # `temperature=0` + `seed` 都救不了，因為輸入雖同、運算路徑已不同。
+    #
+    # 實測後果不是「偶爾答錯」而是「掉進另一個穩定點並持續」：同一題原本
+    # 1435 字含 3 張表，並行干擾後變成 855 字 0 張表，而且之後每次都一樣，
+    # 看起來像系統本來就這樣。要重啟服務並卸載模型才會回來。
+    #
+    # 序列化的代價是併發時要排隊，但 8GB 卡本來就沒有真正的併發能力 ——
+    # 兩個請求並行只會一起變慢又互相污染。排隊反而總吞吐更好且結果正確。
+    #
+    # 換更大的顯卡（模型能完全常駐 GPU、不溢位）後可在管理介面調高。
+    OLLAMA_MAX_CONCURRENCY: int = 1
     # Optional generation controls (help avoid truncated answers)
     # -1 for unlimited tokens (Ollama default); increase context for long PDFs
     OLLAMA_NUM_PREDICT: int | None = -1

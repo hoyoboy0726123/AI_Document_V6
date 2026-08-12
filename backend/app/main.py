@@ -268,6 +268,27 @@ def apply_ocr_overrides_from_db() -> None:
         logger.warning("apply_ocr_overrides_from_db failed: %s", exc)
 
 
+def apply_llm_concurrency_from_db() -> None:
+    """把管理介面設定的 LLM 併發上限帶回 in-memory settings。
+
+    沒有這段的話，管理員調整後只在該行程生效，重啟就回到程式預設值。
+    """
+    try:
+        from .services.system_config import SystemConfigService
+
+        db = SessionLocal()
+        try:
+            stored = SystemConfigService(db).get_config("llm.max_concurrency")
+            if stored is not None:
+                settings.OLLAMA_MAX_CONCURRENCY = max(1, min(8, int(stored)))
+                logger.info("LLM 併發上限（來自 system_configs）= %d",
+                            settings.OLLAMA_MAX_CONCURRENCY)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("apply_llm_concurrency_from_db failed: %s", exc)
+
+
 # Audit M：schema 由 Alembic 管理；alembic 不可用時才退回 legacy 路徑。
 if not run_db_migrations():
     models.Base.metadata.create_all(bind=engine)
@@ -275,6 +296,7 @@ if not run_db_migrations():
 ensure_default_admin()
 apply_llm_overrides_from_db()
 apply_ocr_overrides_from_db()
+apply_llm_concurrency_from_db()
 
 # Start the single serial KG worker (KG extraction is funneled through it to avoid
 # concurrent SQLite writers; see services/kg_queue.py).

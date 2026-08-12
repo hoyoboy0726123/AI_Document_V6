@@ -754,6 +754,55 @@ def update_ocr_config(
     return {"ok": True}
 
 
+@router.get("/llm-concurrency")
+@router.get("/llm-concurrency/")
+def get_llm_concurrency(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """讀取「同時允許幾個 LLM 請求」。"""
+    _ = current_admin
+    stored = SystemConfigService(db).get_config("llm.max_concurrency")
+    try:
+        value = int(stored) if stored is not None else int(settings.OLLAMA_MAX_CONCURRENCY)
+    except (TypeError, ValueError):
+        value = int(settings.OLLAMA_MAX_CONCURRENCY)
+    return {
+        "max_concurrency": max(1, value),
+        "min": 1,
+        "max": 8,
+        "note": ("1 = 完全序列化（小顯存機器建議值）。並行請求會讓 Ollama 改變模型的 "
+                 "GPU/CPU 層切分，導致同一個問題的答案品質改變且持續不恢復。"
+                 "換用能讓模型完全常駐 GPU 的顯卡後才建議調高。"),
+    }
+
+
+@router.put("/llm-concurrency")
+@router.put("/llm-concurrency/")
+def update_llm_concurrency(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """更新 LLM 併發上限；立即生效（ollama_client 偵測到變動會重建信號量）。"""
+    _ = current_admin
+    try:
+        value = int(payload.get("max_concurrency"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="max_concurrency 必須是整數")
+    if not 1 <= value <= 8:
+        raise HTTPException(status_code=400, detail="max_concurrency 需介於 1 到 8")
+
+    SystemConfigService(db).set_config(
+        "llm.max_concurrency", value, "同時允許幾個 LLM 請求（1 = 序列化）")
+    try:
+        settings.OLLAMA_MAX_CONCURRENCY = value
+    except Exception as exc:
+        logger.warning("寫入 in-memory settings 失敗: %s", exc)
+    logger.info("LLM 併發上限已改為 %d", value)
+    return {"ok": True, "max_concurrency": value}
+
+
 @router.put("/vector-config")
 @router.put("/vector-config/")
 def update_vector_config(
