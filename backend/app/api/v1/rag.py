@@ -230,6 +230,15 @@ def query_rag(
         system_prompt=rag_prompts["system_prompt"],
         user_template=rag_prompts["user_template"],
     )
+    # 引用事後校驗：contexts 的 source_num 就是提示詞裡的 [來源N] 編號，
+    # text 是模型實際看到的內容 —— 用它比對最準。只換標記，不動內容。
+    if getattr(settings, "RAG_CITATION_CHECK", True):
+        try:
+            from ...services import citation_check
+            answer, _ = citation_check.validate_citations(
+                answer, {c["source_num"]: c["text"] for c in contexts})
+        except Exception as exc:
+            logger.warning("引用校驗失敗，保留原答案: %s", exc)
     return schemas.RAGQueryResponse(
         answer=answer,
         sources=sources,
@@ -354,14 +363,30 @@ def query_stream(
                     if stream_chunk.get("type") == "content":
                         answer_parts.append(stream_chunk.get("text") or "")
                     yield f"data: {json.dumps(stream_chunk, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
+
+            # 引用事後校驗。串流已逐字送出、收不回來，所以：
+            #   1) 修正後版本存進對話串（與 dedupe_sections 同一個道理）
+            #   2) 若有修正，在 sources 事件附上 corrected_answer，前端用它
+            #      替換畫面上累積的文字 —— 使用者只會看到引用編號在結尾閃一下
+            final_answer = "".join(answer_parts)
+            if getattr(settings, "RAG_CITATION_CHECK", True):
+                try:
+                    from ...services import citation_check
+                    fixed, _cfx = citation_check.validate_citations(
+                        final_answer, {c["source_num"]: c["text"] for c in contexts})
+                    if _cfx:
+                        final_answer = fixed
+                except Exception as exc:
+                    logger.warning("引用校驗失敗，保留原答案: %s", exc)
+            corrected = final_answer if final_answer != "".join(answer_parts) else None
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query, 'corrected_answer': corrected}, ensure_ascii=False)}\n\n"
 
             # 串流是逐段送出的，段落級去重當下做不到（需要完整答案）。
             # 存檔前補跑一次，至少讓對話串裡留下的是乾淨版本。
             from ...services.ollama_client import dedupe_sections
             saved = conversations.append_message(
                 db, user_id, conversation_id,
-                question=question, answer=dedupe_sections("".join(answer_parts)),
+                question=question, answer=dedupe_sections(final_answer),
                 sources=sources_data, mode="rag",
             )
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': saved.id if saved else None}, ensure_ascii=False)}\n\n"

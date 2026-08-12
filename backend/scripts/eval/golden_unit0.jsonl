@@ -11,3 +11,4 @@
 {"id": "u11", "kind": "absent", "q": "這份文件規定的產品保固年限是幾年", "note": "語料中『保固』『年限』出現 0 次 —— 正確行為是誠實說查不到"}
 {"id": "u12", "kind": "absent", "q": "鹽霧測試的箱體溫度要維持在幾度", "note": "屬 MIL-STD 領域，本語料中『鹽霧』『箱體溫度』出現 0 次"}
 {"id": "u13", "kind": "absent", "q": "PCB 的厚度公差規定是多少 mm", "note": "語料中『厚度公差』出現 0 次；PCB 只以大類名稱出現，無規格"}
+{"id": "u14", "kind": "citation", "q": "buying mode有幾種", "gold": ["Buy & Sell", "Assign", "Turnkey", "Consign"], "cite_anchor": "Consign", "note": "引用歸屬測試。內容在含 Consign/Turnkey 的切片（第13頁起、延伸到第14頁投影片）。實測修正前四個條目全標到類別代號表那個來源 → 引用正確率 0"}

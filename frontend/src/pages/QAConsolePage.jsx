@@ -525,6 +525,9 @@ const QAConsolePage = () => {
           setStreaming((prev) =>
             prev ? {
               ...prev,
+              // 引用事後校驗若修正了 [來源N] 編號，後端會附上完整修正版；
+              // 串流已逐字送出收不回來，這裡整段替換（只有編號變，內容不變）。
+              answer: event.corrected_answer || prev.answer,
               sources: event.sources ?? [],
               is_followup: event.is_followup ?? false,
               optimized_query: event.optimized_query ?? null,

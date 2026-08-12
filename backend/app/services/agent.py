@@ -910,6 +910,16 @@ def _grounded_synthesis(
     _ctx = [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
     ans = _flag_unsourced_values(_degrade_empty_tables(ans), _ctx)
     ans = _flag_unverified_premise(question, ans, _ctx)
+    # 引用事後校驗也在迴圈結束後做（同上理由）。sources 與提示詞裡的
+    # [來源N] 編號同序（_synthesize_grounded 在同一迴圈建立兩者），
+    # 所以 N 對應 sources[N-1]。只換標記編號，不動答案內容。
+    if ans and getattr(settings, "RAG_CITATION_CHECK", True):
+        try:
+            from . import citation_check
+            ans, _cfx = citation_check.validate_citations(
+                ans, {i + 1: (s.get("snippet") or "") for i, s in enumerate(sources)})
+        except Exception as exc:  # noqa: BLE001 — 校驗失敗不可拖垮答案本身
+            logger.warning("引用校驗失敗，保留原答案: %s", exc)
     return ans, sources, n_used, n_total
 
 

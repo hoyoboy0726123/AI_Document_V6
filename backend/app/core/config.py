@@ -204,6 +204,14 @@ class Settings(BaseSettings):
     #     snippet 500  / pool 24   hit@5 0.433  MRR 0.300   <- 少 9 題
     # reranker 先前不是弱，是被餓著（平均塊長 1465，卻只餵它 500 字元）。
     RAG_RERANK_POOL: int = 12
+    # 引用事後校驗：答案生成後比對每個 [來源N] 段落與該來源內容的詞重疊，
+    # 錯標且「有明確更佳來源」時改標。只動引用標記、不碰答案內容 ——
+    # 確定性字串比對，同輸入同輸出（services/citation_check.py）。
+    # 為什麼需要：7B 模型不做逐段歸屬，實測「buying mode有幾種」四個條目
+    # 全標 [來源4]（類別代號表），內容其實在來源 2（BUYING MODE 切片）。
+    # 引用錯誤比答錯更難察覺：使用者點開來源想驗證，看到不相關內容，
+    # 反而以為答案是編的。
+    RAG_CITATION_CHECK: bool = True
     RAG_RERANK_MIN_SCORE: int = 3               # LLM 後端：低於此分（0-10）視為不相關，剔除
     # rerank 後端：cross_encoder（專門模型，CPU，~1-3s，建議）／ llm（用 gemma 打分，慢 ~100s）。
     # cross_encoder 載入失敗會自動退回 llm。

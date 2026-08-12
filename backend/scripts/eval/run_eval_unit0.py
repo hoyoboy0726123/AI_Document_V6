@@ -63,9 +63,12 @@ def _declined(text: str) -> bool:
     return any(m in text for m in _DECLINE_MARKERS)
 
 
-def ask(client: httpx.Client, headers: dict, question: str) -> str:
-    """走混合模式（前端預設）。空歷史，避免前一題的主體污染改寫。"""
-    event, answer = None, ""
+def ask(client: httpx.Client, headers: dict, question: str) -> tuple:
+    """走混合模式（前端預設）。空歷史，避免前一題的主體污染改寫。
+
+    回傳 (answer, sources)：citation 題型要用 sources 驗證 [來源N] 指向誰。
+    """
+    event, answer, sources = None, "", []
     with client.stream("POST", f"{BASE}/agent/route", headers=headers, json={
         "question": question, "top_k": 5, "max_steps": 8,
         "conversation_history": [],
@@ -79,18 +82,36 @@ def ask(client: httpx.Client, headers: dict, question: str) -> str:
             data = json.loads(line[6:])
             if event == "final":
                 answer = data.get("text") or ""
+                sources = data.get("sources") or []
             elif event == "error":
                 answer = f"[ERROR] {data.get('message')}"
-    return answer
+    return answer, sources
 
 
-def score_item(item: dict, answer: str) -> tuple[float, str]:
+def score_item(item: dict, answer: str, sources: list) -> tuple[float, str]:
     kind = item["kind"]
     if kind == "absent":
         return (1.0, "正確拒答") if _declined(answer) else (0.0, "未拒答（可能編造）")
 
     golds = item.get("gold") or []
     hit = _hits(golds, answer)
+
+    if kind == "citation":
+        # 引用正確率：答案裡每個 [來源N]，其 sources[N-1] 的 snippet 必須含
+        # cite_anchor（該題內容獨有的鑑別詞）。全部命中 = 1，按比例給分。
+        # 內容先要及格（gold 過半），否則沒引用可驗也沒意義。
+        if hit * 2 < len(golds):
+            return 0.0, f"內容不及格 {hit}/{len(golds)}"
+        import re as _re
+        cited = _re.findall(r"\[來源(\d+)\]", answer)
+        if not cited:
+            return 0.0, "沒有任何引用標記"
+        anchor = item.get("cite_anchor") or ""
+        ok = sum(1 for n in cited
+                 if 0 < int(n) <= len(sources)
+                 and anchor in (sources[int(n) - 1].get("snippet") or ""))
+        return ok / len(cited), f"引用正確 {ok}/{len(cited)}"
+
     if kind == "exact":
         bad = [f for f in (item.get("forbidden") or []) if _norm(f) in _norm(answer)]
         if bad:
@@ -117,9 +138,9 @@ def main() -> None:
         results, t_start = [], time.perf_counter()
         for it in items:
             t0 = time.perf_counter()
-            ans = ask(c, h, it["q"])
+            ans, srcs = ask(c, h, it["q"])
             dt = time.perf_counter() - t0
-            sc, detail = score_item(it, ans)
+            sc, detail = score_item(it, ans, srcs)
             results.append({"id": it["id"], "kind": it["kind"], "q": it["q"],
                             "score": round(sc, 3), "detail": detail,
                             "answer_len": len(ans), "seconds": round(dt, 1)})
