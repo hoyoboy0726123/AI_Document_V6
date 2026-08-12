@@ -80,7 +80,9 @@ def create(db: Session, user_id: str, title: Optional[str] = None,
 def append_message(db: Session, user_id: str, conversation_id: Optional[str],
                    question: str, answer: str,
                    sources: Optional[List[Dict[str, Any]]] = None,
-                   mode: str = "rag") -> Optional[models.Conversation]:
+                   mode: str = "rag",
+                   optimized_query: Optional[str] = None,
+                   is_followup: bool = False) -> Optional[models.Conversation]:
     """把一輪問答寫進對話串；conversation_id 為空或不屬於此人時自動開新的一條。
 
     回傳寫入的那條對話（呼叫端要把 id 回給前端，前端才知道這輪落在哪一串）。
@@ -95,6 +97,11 @@ def append_message(db: Session, user_id: str, conversation_id: Optional[str],
         "sources": sources or [],
         "mode": mode,
         "agentMode": mode == "agent",
+        # 「AI 理解」與「追問」標籤同樣要持久化：只活在當輪 SSE 事件裡的話，
+        # 切換對話再切回來（訊息從 DB 重載）標籤就消失 —— 使用者會以為系統
+        # 沒顯示「最終用什麼去查」。optimized_query 只在真的改寫時存。
+        "optimized_query": optimized_query,
+        "is_followup": bool(is_followup),
         "timestamp": datetime.utcnow().isoformat(),
     }
     try:

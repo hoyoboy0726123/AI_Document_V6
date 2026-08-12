@@ -457,6 +457,7 @@ const QAConsolePage = () => {
     setStreaming({
       question, thinking: "", answer: "", isStreaming: true, thinkingDone: false,
       sources: [], agentMode: true, hybrid: true, routedMode: null, agentSteps: [],
+      is_followup: isFollowup, optimized_query: null,
     });
     const historyForAgent = isFollowup
       ? conversationHistory.map((m) => ({ question: m.question, answer: m.answer }))
@@ -866,11 +867,17 @@ const QAConsolePage = () => {
                         </Tag>
                       )}
                       <Text strong style={{ fontSize: 16, marginLeft: 8 }}>{streamingMsg.question}</Text>
-                      {streamingMsg.optimized_query && streamingMsg.optimized_query !== streamingMsg.question && (
+                      {/* 與 HistoryMessage 一致：有改寫顯示 AI 理解，追問未改寫則明示以原句檢索
+                          （後者要等 final/sources 事件回來才確定，故加 thinkingDone 條件） */}
+                      {streamingMsg.optimized_query && streamingMsg.optimized_query !== streamingMsg.question ? (
                         <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #1890ff" }}>
                           <Text type="secondary" style={{ fontSize: 13 }}>AI 理解：{streamingMsg.optimized_query}</Text>
                         </div>
-                      )}
+                      ) : (streamingMsg.is_followup && streamingMsg.thinkingDone ? (
+                        <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #d9d9d9" }}>
+                          <Text type="secondary" style={{ fontSize: 13 }}>以原句檢索（未改寫）</Text>
+                        </div>
+                      ) : null)}
                     </div>
                     <Card size="small" style={{ background: "#f9f9f9", borderLeft: streamingMsg.agentMode ? "4px solid #1677ff" : "4px solid #52c41a" }}>
                       {/* Agent steps timeline (when in agent mode) */}

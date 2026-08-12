@@ -388,6 +388,10 @@ def query_stream(
                 db, user_id, conversation_id,
                 question=question, answer=dedupe_sections(final_answer),
                 sources=sources_data, mode="rag",
+                optimized_query=(optimized_query
+                                 if optimized_query and optimized_query != question
+                                 else None),
+                is_followup=bool(payload.conversation_history),
             )
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': saved.id if saved else None}, ensure_ascii=False)}\n\n"
         except Exception as e:

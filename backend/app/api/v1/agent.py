@@ -129,6 +129,7 @@ def agent_route(
             )
             yield _sse("route", {"mode": mode})
             final_text, final_sources = "", []
+            meta: Dict[str, Any] = {}    # rag 分支填入改寫結果；agent 分支保持空
             if mode == "agent":
                 for evt in agent.run_agent(db, question, conversation_history=history, max_steps=max_steps):
                     etype = evt.get("type")
@@ -141,9 +142,8 @@ def agent_route(
                     else:
                         yield _sse(etype or "info", evt)
             else:
-                # meta 會被填入查詢改寫的結果，交給前端顯示「AI 理解：xxx」。
-                # 純 RAG 端點早就有這個顯示，混合模式（預設）反而沒有。
-                meta: Dict[str, Any] = {}
+                # meta（宣告於分支前）會被填入查詢改寫的結果，交給前端顯示
+                # 「AI 理解：xxx」並隨 append_message 持久化。
                 final_text, final_sources = agent.run_rag_only(
                     db, question, conversation_history=history, out_meta=meta)
                 yield _sse("final", {
@@ -157,6 +157,9 @@ def agent_route(
                 db, user_id, conversation_id,
                 question=question, answer=final_text,
                 sources=final_sources, mode=f"hybrid:{mode}",
+                optimized_query=(meta.get("optimized_query")
+                                 if mode == "rag" and meta.get("rewritten") else None),
+                is_followup=bool(history),
             )
             yield _sse("done", {"ok": True, "mode": mode,
                                 "conversation_id": saved.id if saved else None})
