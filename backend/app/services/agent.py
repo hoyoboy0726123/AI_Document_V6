@@ -453,6 +453,25 @@ def resolve_query(question: str,
             if cn(q) != cn(opt):
                 logger.info("改寫結果語言不一致，維持原問句：「%s」→「%s」", q[:30], opt[:30])
                 return {"query": q, "rewritten": False, "source": "llm_rejected"}
+            # 主詞保全：追問句自己沒有主詞時，改寫結果必須帶著前一問的主詞。
+            # LLM 會抓錯焦點 —— 實測「黴菌測試量測濕球溫度時…」的追問「這個測試
+            # 要跑多久」被改寫成「濕球溫度測試 時間長度」：量測面向搶走主詞，
+            # 檢索直接跑出 508.8 的範圍。用 _find_subject 白名單做確定性查核：
+            # 前一問抓得到主詞、而改寫結果連它的中英對應詞都沒帶 → 前綴補上。
+            # 白名單抓不到就放行，不會造成新的誤擋。
+            if _lacks_subject(q):
+                prev_q = ""
+                for _turn in reversed(list(conversation_history or [])):
+                    prev_q = str(_turn.get("question") or "")
+                    if prev_q:
+                        break
+                prev_subj = _find_subject(prev_q)
+                if prev_subj:
+                    _terms = [prev_subj] + (_SUBJECT_TERMS.get(prev_subj) or [])
+                    _low = opt.lower()
+                    if not any(t.lower() in _low for t in _terms):
+                        opt = f"{prev_subj} {opt}"
+                        logger.info("改寫結果缺前輪主詞「%s」，已補上：%s", prev_subj, opt[:60])
             logger.info("查詢改寫（LLM）：「%s」→「%s」", q[:40], opt[:60])
             return {"query": opt, "rewritten": True, "source": "llm"}
         return {"query": q, "rewritten": False, "source": "llm"}
