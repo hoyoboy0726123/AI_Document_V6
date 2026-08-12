@@ -1,6 +1,6 @@
 """查詢改寫行為探針：直接呼叫 analyze_followup_intent，隔離量測提示詞改動。
 
-執行：.venv\Scripts\python.exe scripts\probe_query_rewrite.py（需 Ollama）
+執行：.venv/Scripts/python.exe scripts/probe_query_rewrite.py（需 Ollama）
 
 改 analyze_followup_intent 的提示詞前後各跑一次。2026-08-12 基準：
   舊提示詞（RULE 1 無條件冠前題主體）3/6 —— 自帶主詞的三案全被污染，
