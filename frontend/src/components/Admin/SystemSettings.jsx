@@ -18,6 +18,7 @@ import {
   Tag,
   Divider,
   Space,
+  Typography,
 } from "antd";
 import {
   DatabaseOutlined,
@@ -34,6 +35,8 @@ import {
   FileSearchOutlined,
 } from "@ant-design/icons";
 import apiClient from "../../services/api";
+
+const { Text } = Typography;
 
 // 預設模型清單(可自由打字覆寫,只是當下拉提示用)
 const PRESET_LLM_OLLAMA = [
@@ -225,6 +228,41 @@ const SystemSettings = () => {
     } catch (e) {
       // silent — admin-only or backend unreachable
     }
+  };
+
+  const [resettingInference, setResettingInference] = useState(false);
+
+  const handleResetInference = () => {
+    Modal.confirm({
+      title: "重置推論引擎？",
+      content: (
+        <div>
+          <p>將卸載 Ollama 上所有已載入的模型，下一次查詢會重新載入（約多等 15~30 秒）。</p>
+          <p>適用時機：<strong>答案品質突然變樣</strong>（例如原本完整的表格塌成單張列表）。
+            這是小顯存機器上模型重載偶發落入壞狀態的已知現象，乾淨重載即可恢復。</p>
+          <p>請先確認目前沒有進行中的查詢。</p>
+        </div>
+      ),
+      okText: "重置",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        setResettingInference(true);
+        try {
+          const resp = await apiClient.post("admin/reset-inference");
+          const names = (resp.data.unloaded || []).join("、") || "（沒有已載入的模型）";
+          if (resp.data.ok) {
+            message.success(`已卸載：${names}。下一次查詢將乾淨重載。`);
+          } else {
+            message.warning(`部分卸載失敗：${(resp.data.failed || []).join("、")}`);
+          }
+        } catch (error) {
+          message.error(error.response?.data?.detail ?? "重置失敗");
+        } finally {
+          setResettingInference(false);
+        }
+      },
+    });
   };
 
   const fetchLlmConcurrency = async () => {
@@ -943,14 +981,30 @@ const SystemSettings = () => {
               </Form.Item>
             </Col>
           </Row>
-          <Button
-            type="primary"
-            htmlType="submit"
-            icon={<SaveOutlined />}
-            loading={savingConcurrency}
-          >
-            儲存
-          </Button>
+          <Space>
+            <Button
+              type="primary"
+              htmlType="submit"
+              icon={<SaveOutlined />}
+              loading={savingConcurrency}
+            >
+              儲存
+            </Button>
+            <Button
+              danger
+              icon={<WarningOutlined />}
+              loading={resettingInference}
+              onClick={handleResetInference}
+            >
+              重置推論引擎
+            </Button>
+          </Space>
+          <div style={{ marginTop: 8 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              答案品質突然變樣（完整表格塌成清單）時按「重置推論引擎」：卸載所有模型強制乾淨重載，
+              下一次查詢約多等 15~30 秒。
+            </Text>
+          </div>
         </Form>
       </Card>
 

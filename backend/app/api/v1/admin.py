@@ -803,6 +803,50 @@ def update_llm_concurrency(
     return {"ok": True, "max_concurrency": value}
 
 
+@router.post("/reset-inference")
+@router.post("/reset-inference/")
+def reset_inference_engine(
+    current_admin=Depends(get_current_admin_user),
+):
+    """卸載 Ollama 上所有已載入的模型，強制下一次請求乾淨重載。
+
+    為什麼需要：qwen3:8b @ num_ctx=8192 佔 6.2GB，貼著本機可用 VRAM 的邊緣。
+    模型每次重載（VL 換模、KEEP_ALIVE 到期、服務重啟）都可能落在不同的
+    GPU/CPU 層配置上 —— 偶爾落進一個「答案塌成單張列表」的壞穩定點，且
+    `ollama ps` 兩種狀態都顯示 100% GPU，無法從外部偵測。實測乾淨卸載後
+    重載即恢復（答案回到與基準逐位元組相同）。詳見 DEPLOY_NOTES。
+
+    卸載方式：對每個已載入模型送 keep_alive=0 的空請求（Ollama 官方的
+    卸載慣例，等同 CLI 的 `ollama stop`）。生成型模型走 /api/generate，
+    嵌入型模型 generate 會失敗，退而走 /api/embed。
+    """
+    _ = current_admin
+    import httpx as _httpx
+
+    unloaded: list = []
+    failed: list = []
+    try:
+        with _httpx.Client(base_url=settings.OLLAMA_BASE_URL, timeout=60) as c:
+            loaded = (c.get("/api/ps").json() or {}).get("models") or []
+            for m in loaded:
+                name = m.get("name") or m.get("model") or ""
+                if not name:
+                    continue
+                try:
+                    r = c.post("/api/generate", json={"model": name, "keep_alive": 0})
+                    if r.status_code != 200:
+                        r = c.post("/api/embed",
+                                   json={"model": name, "input": "x", "keep_alive": 0})
+                    (unloaded if r.status_code == 200 else failed).append(name)
+                except Exception:
+                    failed.append(name)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"連不上 Ollama：{exc}")
+
+    logger.info("重置推論引擎：卸載 %s，失敗 %s", unloaded, failed or "無")
+    return {"ok": not failed, "unloaded": unloaded, "failed": failed}
+
+
 @router.put("/vector-config")
 @router.put("/vector-config/")
 def update_vector_config(
