@@ -568,17 +568,35 @@ Conversation history (most recent last):
 Current user question: {current_question}
 
 Instructions for the optimized query:
-- RULE 1 (MANDATORY): The primary test name / subject from the PREVIOUS question MUST appear as the first term in the optimized query. Never drop it.
-- RULE 2: Append the new intent keywords from the current question after the preserved subject.
+- STEP 1 (decide first): Is the current question SELF-CONTAINED? It is self-contained when it
+  already names its own subject/topic and would be fully understandable with no history at all.
+  A DIFFERENT topic from the previous question is still self-contained — users change topics
+  mid-conversation all the time.
+  → If SELF-CONTAINED: return the current question UNCHANGED as the optimized query.
+    Do NOT prepend, append, or merge anything from the previous question. Never combine
+    two different topics into one query.
+- STEP 2 (only if NOT self-contained): the question is elliptical — it leans on the previous
+  question via pronouns (那/這/它/it/that), a bare parameter ("limit", "那濕度呢"), or would be
+  meaningless alone. Then the subject from the PREVIOUS question MUST appear as the first
+  term, followed by the new intent keywords. Never drop the inherited subject in this case.
 - RULE 3: Return ONE phrase (<= 12 words), no commas or lists, spaces allowed only.
 - RULE 4: Language must match the user's current question language.
 
 Examples:
+- Prev: "buying mode有幾種"  New: "料件有哪些種類"
+  → self-contained (own subject 料件; topic change is allowed)
+  Optimized: "料件有哪些種類"   ← UNCHANGED. "buying mode 料件種類" would be WRONG.
+- Prev: "鹽霧測試的箱體溫度要維持在幾度"  New: "冷凝測試方法與條件"
+  → self-contained (own subject 冷凝測試)
+  Optimized: "冷凝測試方法與條件"   ← UNCHANGED. Do not prepend 鹽霧測試.
 - Prev: "請問 Pressure test 有幾種測試?"  New: "我要知道測試力量"
+  → elliptical (no subject of its own)
   Optimized: "Pressure test 測試力量 數值"
 - Prev: "What are ESD test steps?"  New: "limit"
+  → elliptical
   Optimized: "ESD test limit values"
 - Prev: "shock test 測試標準"  New: "那關機測試標準呢"
+  → elliptical (那…呢 refers back)
   BAD:  "關機測試 標準"          ← dropped "shock test", WRONG
   GOOD: "shock test 關機條件 標準" ← kept subject, CORRECT
 - Prev: "vibration test procedure"  New: "pass criteria?"
