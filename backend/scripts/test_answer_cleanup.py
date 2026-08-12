@@ -10,7 +10,9 @@ import pathlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from app.services.ollama_client import dedupe_sections, to_traditional  # noqa: E402
+from app.services.ollama_client import (  # noqa: E402
+    dedupe_sections, dedupe_table_rows, to_traditional,
+)
 
 results = []
 
@@ -64,6 +66,31 @@ check("標題不同、內文相同也要保留（第1與第3項）", out2.count(
 check("段落數少於 3 不處理", dedupe_sections("### A\nx\n\n### A\nx\n") == "### A\nx\n\n### A\nx\n")
 check("短文字不處理", dedupe_sections("很短的答案") == "很短的答案")
 check("空輸入安全", dedupe_sections("") == "" and dedupe_sections(None) is None)
+
+# ── 表格列去重 ────────────────────────────────────────────
+# dedupe_sections 抓不到這種：它以標題／條列行切段，表格列不是段落起點。
+# 實測「料件有哪些種類」的類別代號表末端三列被完整複製了一次。
+DUP_ROWS = """| 代號 | 名稱 |
+| --- | --- |
+| 22SW0 | FACILITY (SOFTWARE) |
+| 22GM0 | MARKETING |
+| AC | REVENUE |
+| 22SW0 | FACILITY (SOFTWARE) |
+| 22GM0 | MARKETING |
+| AC | REVENUE |
+"""
+_o = dedupe_table_rows(DUP_ROWS)
+check("連續重複的表格列被移除", _o.count("22SW0") == 1, f"→ {_o.count('22SW0')} 次")
+check("表頭與分隔列保留", "| 代號 | 名稱 |" in _o and "| --- | --- |" in _o)
+
+_two = "| A | 1 |\n| B | 2 |\n\n說明文字\n\n| A | 1 |\n| C | 3 |\n"
+check("跨表格的相同列不刪", dedupe_table_rows(_two).count("| A | 1 |") == 2)
+
+_far = "| X | 9 |\n" + "".join(f"| R{i} | {i} |\n" for i in range(12)) + "| X | 9 |\n"
+check("同表格但相隔 12 列以上的相同列保留", dedupe_table_rows(_far).count("| X | 9 |") == 2)
+check("無表格不動", dedupe_table_rows("純文字") == "純文字")
+check("空輸入安全", dedupe_table_rows("") == "" and dedupe_table_rows(None) is None)
+
 
 # ── 簡體轉正體（OpenCC s2tw）──────────────────────────────
 check("摆 → 擺", to_traditional("摆錘衝擊測試") == "擺錘衝擊測試")

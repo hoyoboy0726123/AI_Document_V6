@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # 24GB VRAM 跑 qwen3:8b @ 24k 綽綽有餘。放寬後務必用評估確認長脈絡下
     # 生成品質沒有退化（長 context 可能出現「中間遺失」）。
     OLLAMA_NUM_CTX: int | None = 24576
+    # 嵌入模型的 ctx 與 chat 分開設：qwen3-embedding:8b 若用模型預設 32768，
+    # KV cache 讓它吃到 10GB —— 8GB 卡連單獨載入都不行，直接溢出到 CPU。
+    # 降到 4096 只剩 6.6GB，且對嵌入值零影響（實測與預設 ctx 的 cosine =
+    # 1.000000；切塊上限 ~2000 字元，遠低於 4096）。
+    OLLAMA_EMBED_NUM_CTX: int | None = 4096
     # Sampling and repetition controls (optional; set in .env if needed)
     # 生成的可重現性。
     #

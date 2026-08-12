@@ -323,6 +323,25 @@ def _augment_tables_rowwise(text: str) -> str:
     return "\n".join(out)
 
 
+# 並列縮寫（「ER PR是什麼」）在 temp=0 貪婪解碼下會被模型讀成單一複合詞，
+# 只回答其中一個。提示詞規則扳不動（實測「請逐一回答每個項目」的通用原則對
+# 「ER與PR」有效、對「ER PR」連寫無效），唯一穩定的做法是把偵測到的項目
+# 逐一點名。只註記送給模型的文字，不改使用者問句的儲存與顯示。
+# lookaround 而非 \b：中文字元屬 \w，「PR是」之間沒有 \b 邊界。
+_JUXTAPOSED_ABBREV_RE = re.compile(
+    r"(?<![A-Za-z0-9])[A-Z]{2,5}(?:[ 　]+[A-Z]{2,5})+(?![A-Za-z0-9])"
+)
+
+
+def _annotate_juxtaposed_items(question: str) -> str:
+    m = _JUXTAPOSED_ABBREV_RE.search(question or "")
+    if not m:
+        return question
+    items = m.group(0).split()
+    return (f"{question}\n（此問題包含 {len(items)} 個並列項目："
+            f"{'、'.join(items)}，請逐一分別回答）")
+
+
 def _build_rag_messages(
     question: str,
     context_blocks: List[Dict[str, str]],
@@ -368,7 +387,7 @@ def _build_rag_messages(
 
     prompt = (
         tmpl
-        .replace("{{question}}", question)
+        .replace("{{question}}", _annotate_juxtaposed_items(question))
         .replace("{{context}}", context_text)
         .replace("{{history}}", history_section)
     )
@@ -568,10 +587,16 @@ Conversation history (most recent last):
 Current user question: {current_question}
 
 Instructions for the optimized query:
-- RULE 1 (MANDATORY): The primary test name / subject from the PREVIOUS question MUST appear as the first term in the optimized query. Never drop it.
-- RULE 2: Append the new intent keywords from the current question after the preserved subject.
+- RULE 1: FIRST decide whether the CURRENT question already names its own subject
+  (a test name, a spec number, a topic, an abbreviation being asked about).
+  * If it DOES → return it essentially unchanged. Do NOT prepend the previous
+    subject. Adding an unrelated subject actively hurts retrieval.
+  * If it does NOT (it says "那個/這個/它", or is a bare parameter like
+    "那濕度呢" / "要跑多久") → the previous subject MUST appear as the first term.
+- RULE 2: Append the new intent keywords from the current question after the subject.
 - RULE 3: Return ONE phrase (<= 12 words), no commas or lists, spaces allowed only.
-- RULE 4: Language must match the user's current question language.
+- RULE 4: Language must match the user's current question language. Never translate
+  the whole query into another language.
 
 Examples:
 - Prev: "請問 Pressure test 有幾種測試?"  New: "我要知道測試力量"
@@ -583,6 +608,16 @@ Examples:
   GOOD: "shock test 關機條件 標準" ← kept subject, CORRECT
 - Prev: "vibration test procedure"  New: "pass criteria?"
   Optimized: "vibration test pass criteria"
+
+Cases where the current question ALREADY has its own subject — keep it as-is:
+- Prev: "料件有哪些種類"  New: "ER與PR是什麼意思"
+  BAD:  "料件 ER 與 PR 是什麼意思"   ← ER/PR are process phases, unrelated to 料件; prepending misleads retrieval
+  GOOD: "ER PR 是什麼意思"
+- Prev: "鹽霧測試的箱體溫度"  New: "冷凝測試方法與條件"
+  BAD:  "鹽霧測試 冷凝測試方法"      ← the user switched topic on purpose
+  GOOD: "冷凝測試方法與條件"
+- Prev: "沙塵測試的濃度"  New: "MIL-STD-331D 的落錘高度"
+  GOOD: "MIL-STD-331D 落錘高度"     ← spec number is its own subject
 
 Return JSON strictly following the schema.
 """

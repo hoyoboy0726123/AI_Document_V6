@@ -160,6 +160,98 @@ def _build_match(query: str) -> Optional[str]:
     return " OR ".join('"%s"' % t.replace('"', "") for t in seen)
 
 
+# ── 短縮寫的補救檢索 ────────────────────────────────────────────────
+# trigram tokenizer 需要 token ≥ 3 字元，因此「ER」「PR」「EC」這類兩字母縮寫
+# 在 BM25 裡是**完全搜不到的**：實測 `MATCH "ER"` 回 0 塊，而「ER PR是什麼?」
+# 經 _build_match 只剩 '"是什麼"'（同樣 0 塊）。縮寫查詢因此只剩向量一條路。
+#
+# 而向量對這種查詢特別不可靠：定義往往被埋在一個主要在講別的事的大塊裡。
+# 實測教材的 ER/PR 定義位在 1698 字元塊的第 444 字元處，整塊語意被前面的
+# 料件代號表主導，相似度 0.373 —— 反而**低於** MIL-STD-461G 描述「兩個字母
+# 加三位數字代號」的段落（0.38-0.43）。兩條路都失效，答案就撈不到。
+#
+# 補一條 GLOB 精確比對。字元類充當詞界，整段在 SQLite C 層掃描，實測 6.5k 塊
+# 約 0.2-0.6 秒，且只在查詢真的含兩字母縮寫時才觸發。
+_SHORT_ABBREV_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}(?![A-Za-z0-9])")
+# 命中太多代表這個縮寫沒有鑑別力（例如出現在每頁頁首），放棄它而不是灌爆候選池
+_ABBREV_MAX_HITS = 30
+_ABBREV_MAX_TOKENS = 3  # 掃描成本上限
+# keyword_search 回傳值的名次才有意義（fuse 只看 enumerate 的位置），
+# 分數本身不參與計算；用一個明顯不是 bm25 的哨兵值，方便日誌辨識。
+_ABBREV_SCORE = -99.0
+
+
+def _abbrev_query(path: str, query: str) -> List[int]:
+    """對查詢中的兩字母縮寫做 GLOB 精確比對，回傳 faiss_id。任何失敗都回空清單。"""
+    toks: List[str] = []
+    for t in _SHORT_ABBREV_RE.findall(query or ""):
+        if t not in toks:
+            toks.append(t)
+    if not toks:
+        return []
+    try:
+        conn = _connect(path)
+    except Exception as e:
+        logger.warning("縮寫補救檢索取不到連線：%s", e)
+        return []
+    per_tok: List[List[int]] = []
+    try:
+        with _BUILD_LOCK:
+            _ensure_index(conn)
+        for tok in toks[:_ABBREV_MAX_TOKENS]:
+            try:
+                rows = conn.execute(
+                    f"SELECT rowid FROM {_FTS_TABLE} WHERE text GLOB ? LIMIT ?",
+                    (f"*[^A-Za-z0-9]{tok}[^A-Za-z0-9]*", _ABBREV_MAX_HITS + 1),
+                ).fetchall()
+            except Exception as e:
+                logger.warning("縮寫「%s」GLOB 檢索失敗：%s", tok, e)
+                continue
+            if len(rows) > _ABBREV_MAX_HITS:
+                logger.info("縮寫「%s」命中超過 %d 塊，無鑑別力，略過", tok, _ABBREV_MAX_HITS)
+                continue
+            per_tok.append([fid for (fid,) in rows])
+    finally:
+        conn.close()
+    if not per_tok:
+        return []
+    # 多個縮寫時優先取「同時含全部縮寫」的塊：使用者一次問 ER 和 PR，兩者都在
+    # 的塊幾乎必是定義處（實測交集恰為 1 塊）；單一縮寫的字面命中則常是噪音
+    # （MIL-HDBK-454 的「Army - ER」管理單位代碼），有交集時不讓它們進候選、
+    # 佔掉 rerank 名額還以相似度 0.000 出現在引用列表裡。
+    out: List[int] = []
+    if len(per_tok) > 1:
+        inter = set(per_tok[0]).intersection(*per_tok[1:])
+        if inter:
+            out = [fid for fid in per_tok[0] if fid in inter]
+            logger.info("縮寫補救檢索：%s 交集 → %d 塊",
+                        "/".join(toks[:_ABBREV_MAX_TOKENS]), len(out))
+            return out
+    for fids in per_tok:
+        for fid in fids:
+            if fid not in out:
+                out.append(fid)
+    if out:
+        logger.info("縮寫補救檢索：%s → %d 塊", "/".join(toks[:_ABBREV_MAX_TOKENS]), len(out))
+    return out
+
+
+def _merge_abbrev(abbrev: List[int], rows: List[Tuple[int, float]],
+                  top_k: int) -> List[Tuple[int, float]]:
+    """把縮寫命中排到 BM25 名單前面。
+
+    放前面是因為這是使用者明確打出來的稀有字面詞的精確命中（實測 ER 全語料
+    只有 9 塊），精確度遠高於 trigram 的子字串比對。數量已由 _ABBREV_MAX_HITS
+    封頂，不會把 BM25 名單整個擠掉。
+    """
+    if not abbrev:
+        return rows
+    seen = set(abbrev)
+    merged = [(fid, _ABBREV_SCORE) for fid in abbrev]
+    merged.extend((fid, s) for fid, s in rows if fid not in seen)
+    return merged[:top_k]
+
+
 _HAS_CJK_RE = re.compile(r"[一-鿿]")
 _EN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]*")
 _TRANSLATE_CACHE: Dict[str, str] = {}
@@ -232,18 +324,25 @@ def keyword_search(db: Session, query: str, top_k: int) -> List[Tuple[int, float
     if not path:
         logger.warning("keyword_search 略過：取不到 SQLite 路徑（非 SQLite 或 session 無 bind）")
         return []
+    # 兩字母縮寫 trigram 索引不到，先另走 GLOB 補一路（見 _abbrev_query 註解）
+    abbrev = _abbrev_query(path, query)
+
     match = _build_match(query)
     if not match:
+        if abbrev:
+            return _merge_abbrev(abbrev, [], top_k)
         logger.info("keyword_search 略過：查詢無可用 term「%s」", query[:40])
         return []
     try:
         rows = _fts_query(path, match, top_k)
     except Exception as e:  # FTS 任何問題都退回純向量，絕不讓檢索整個壞掉
         logger.warning("hybrid_search keyword_search failed, falling back: %s", e)
-        return []
+        return _merge_abbrev(abbrev, [], top_k)
 
-    if rows:
-        return rows
+    if rows or abbrev:
+        # 有縮寫命中就不必再付中翻英的錢（最久 8 秒）：縮寫是字面精確命中，
+        # 訊號品質比翻譯出來的近義詞高。
+        return _merge_abbrev(abbrev, rows, top_k)
 
     # 撈到 0 筆且查詢含中文 → 語料很可能是英文（MIL-STD 等），中文整句被當成單一片語
     # 而永遠不命中。此時才付翻譯成本，轉成英文檢索詞重試一次。

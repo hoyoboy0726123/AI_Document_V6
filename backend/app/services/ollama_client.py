@@ -157,6 +157,7 @@ def _squelch_repetition(text: str) -> str:
     # 段落級重複與簡體字。掛在這裡而不是各出口自己呼叫：這個函式是所有
     # 回應出口（9 個呼叫點）共同經過的清理鏈，加在這裡才不會漏掉某一條路徑。
     out = dedupe_sections(out)
+    out = dedupe_table_rows(out)
     out = to_traditional(out)
     return out
 
@@ -232,6 +233,45 @@ def to_traditional(text: str) -> str:
 
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6}\s*|[-*]\s+|\d+[.、)]\s*)", re.M)
+
+
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def dedupe_table_rows(text: str) -> str:
+    """移除表格中「連續重複」的資料列。
+
+    實測「料件有哪些種類」的類別代號表，末端三列被完整複製了一次：
+        | 22SW0 | FACILITY (SOFTWARE) |
+        | 22GM0 | MARKETING |
+        | AC    | REVENUE ... |
+        | 22SW0 | FACILITY (SOFTWARE) |   ← 重複
+        ...
+    dedupe_sections 抓不到這種：它以標題／條列行切段，表格列不是段落起點。
+
+    只處理「連續」重複（相鄰或隔幾列內完全相同），不做全表去重 ——
+    規範表格確實會有內容相同但屬於不同分組的列，全表去重會刪掉真資料。
+    """
+    if not text or "|" not in text:
+        return text
+    lines = text.splitlines()
+    out, seen_window, removed = [], [], 0
+    for ln in lines:
+        if not _TABLE_ROW_RE.match(ln):
+            seen_window = []          # 離開表格就重置，不跨表比對
+            out.append(ln)
+            continue
+        key = re.sub(r"\s+", "", ln)
+        if key in seen_window:
+            removed += 1
+            continue
+        seen_window.append(key)
+        if len(seen_window) > 8:      # 只看最近 8 列，避免全表去重
+            seen_window.pop(0)
+        out.append(ln)
+    if removed:
+        logger.info("移除 %d 個連續重複的表格列", removed)
+    return "\n".join(out) if removed else text
 
 
 def dedupe_sections(text: str) -> str:
@@ -843,6 +883,13 @@ class OllamaClient:
         }
         if dimensions:
             payload["dimensions"] = dimensions
+        # 不帶 options 時 Ollama 用模型預設 ctx（qwen3-embedding 是 32768，
+        # KV cache 佔到 10GB），8GB 卡會整個溢出到 CPU。見 config 註解。
+        try:
+            if settings.OLLAMA_EMBED_NUM_CTX is not None:
+                payload["options"] = {"num_ctx": settings.OLLAMA_EMBED_NUM_CTX}
+        except Exception:
+            pass
 
         data = self._post("/api/embed", payload)
         embeddings = data.get("embeddings")

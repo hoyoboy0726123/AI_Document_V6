@@ -420,8 +420,11 @@ const QAConsolePage = () => {
               question: prev.question,
               answer: prev.answer,
               sources: prev.sources || [],
-              is_followup: isFollowup,
-              optimized_query: null,
+              // 用後端回報的實際改寫結果，而不是前端送出的旗標 ——
+              // 那個旗標現在恆為 true（一律送完整歷史由後端判斷），
+              // 照它顯示會讓新對話的第一題也被標成「追問」。
+              is_followup: Boolean(doneEvt?.is_followup),
+              optimized_query: doneEvt?.resolved_query || null,
               thinking: "",
               suggested_questions: [],
               used_ai_fallback: false,
@@ -480,7 +483,8 @@ const QAConsolePage = () => {
           if (prev) {
             const newMsg = {
               question: prev.question, answer: prev.answer, sources: prev.sources || [],
-              is_followup: isFollowup, optimized_query: null, thinking: "", suggested_questions: [],
+              is_followup: Boolean(doneEvt?.is_followup),
+              optimized_query: doneEvt?.resolved_query || null, thinking: "", suggested_questions: [],
               used_ai_fallback: false, agentMode: prev.routedMode === "agent", hybrid: true,
               routedMode: prev.routedMode, agentSteps: prev.agentSteps || [], timestamp: new Date().toISOString(),
             };
@@ -567,6 +571,13 @@ const QAConsolePage = () => {
   // 但也不能用 useCallback([]) 直接包 —— 那會鎖住第一次 render 的閉包，
   // loading 與 qaMode 都變成過期值，切換模式後送出還是走舊模式。
   const submitRef = useRef(null);
+  // 改寫不理想時，用原問句重查一次（不帶歷史 → 後端不會改寫）。
+  // 控制權放在事後而非送出前：LLM 改寫要 1-8 秒，沒辦法邊打字邊預覽，
+  // 而看到實際改寫結果再決定，判斷依據準確得多。
+  const handleRequery = useCallback((originalQuestion) => {
+    return submitRef.current?.(originalQuestion, false);
+  }, []);
+
   const handleComposerSubmit = useCallback((question) => {
     // 一律當作「同一條對話的延續」送出：完整歷史交給後端，由 resolve_query
     // 決定要不要改寫。前端不再自己判斷 —— 分類有門檻、門檻會錯，
@@ -835,6 +846,7 @@ const QAConsolePage = () => {
                     onToggleSnippet={toggleSnippet}
                     onPreviewPdf={openPdfPreview}
                     onSaveNote={openSaveNoteModal}
+                    onRequery={handleRequery}
                     showDivider={index < conversationHistory.length - 1 || !!streamingMsg}
                   />
                 ))}

@@ -437,6 +437,7 @@ def resolve_query(question: str,
     q = (question or "").strip()
     if not q or not conversation_history:
         return {"query": q, "rewritten": False, "source": "none"}
+    # 註：呼叫端會把結果寫進 db.info（見 remember_resolved），供端點回報給前端。
 
     if _SELF_CONTAINED_RE.search(q):
         return {"query": q, "rewritten": False, "source": "self_contained"}
@@ -1275,6 +1276,7 @@ def run_rag_only(db: Session, question: str,
     # 查詢改寫（單一入口）。承接「鹽霧測試的箱體溫度」之後問「那濕度呢」，
     # 沒有改寫就會撈回濕度測試的內容。
     _resolved = resolve_query(question, conversation_history)
+    remember_resolved(db, _resolved)
     question = _resolved["query"]
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
 
@@ -1600,6 +1602,30 @@ def get_retrieval_scope(db: Session) -> Dict[str, Any]:
         return {}
 
 
+_RESOLVED_KEY = "resolved_query"
+
+
+def remember_resolved(db: Session, resolved: Dict[str, Any]) -> None:
+    """記下這次的查詢改寫結果，供端點回報給前端。
+
+    介面上的「追問」標籤原本是照前端送的 isFollowup 旗標顯示，但那個旗標
+    現在恆為 true（前端一律送完整歷史、由後端決定要不要改寫），
+    於是新對話的第一題也被標成「追問」—— 標籤與實際行為脫節。
+    真正該顯示的是「這次有沒有承接前文」，只有後端知道。
+    """
+    try:
+        db.info[_RESOLVED_KEY] = dict(resolved or {})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def get_resolved(db: Session) -> Dict[str, Any]:
+    try:
+        return dict(db.info.get(_RESOLVED_KEY) or {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
     """用「使用者原始問題」跑與 /rag/query 完全相同的檢索，回傳 (evidence, confidence)。
 
@@ -1798,6 +1824,7 @@ def run_agent(
     # 對話歷史已指明對象時（例如上一輪在談振動測試）視為有主體，不重複反問。
     # 查詢改寫（與 run_rag_only 共用同一個入口）。
     _resolved = resolve_query(question, conversation_history)
+    remember_resolved(db, _resolved)
     if _resolved["rewritten"]:
         yield {"type": "thought", "step": 0,
                "text": f"承接前文，改以「{_resolved['query']}」查詢"}
@@ -1866,6 +1893,13 @@ def run_agent(
                                 _rag_part = _g.strip()
                     except Exception as e:  # noqa: BLE001
                         logger.warning("early spec-relation supplement failed: %s", e)
+                    # 補充只在「真的有補到內容」時附上。KG 區塊已完整回答時，
+                    # 低信心警語或「查無相關資料」的補充只是噪音 —— 實測 6/23
+                    # QA 集第 10/16/32 題：關係清單全對，卻因補充段的 ⚠️ 橫幅
+                    # 讓整題看起來像失敗。
+                    if _rag_part and ("查無相關資料" in _rag_part
+                                      or "資料庫中沒有找到" in _rag_part):
+                        _rag_part, _rag_src = None, []
                     _body = _blk if not _rag_part else (
                         f"{_blk}\n\n── 補充（文件內容檢索）──\n{_rag_part}"
                     )
@@ -1883,6 +1917,10 @@ def run_agent(
         and _detect_aspect(question) is None
         and not _RELATION_RE.search(question)
         and not _APP_RE.search(question)
+        # 程序題（「有哪些程序」）另有專屬路徑：Procedure 不是 KG 節點，這裡的
+        # list_subitems 只會回章節結構（ANNEX A/B/C、SCOPE…）答非所問。實測
+        # 6/23 QA 集第 15/38 題就是被這個攔截劫持，Procedure I–VIII 整組消失。
+        and not _PROC_Q_RE.search(question)
     ):
         try:
             fb = agent_tools.run_tool(
@@ -1940,6 +1978,8 @@ def run_agent(
     spec_candidates: List[str] = []  # 過程中查到的規範 canonical_id（最後挑「問題提到的那個」當主體）
     kg_edges_seen = 0  # Phase 3：圖譜關聯數，供完整度反問
     structural_results: List[Dict[str, Any]] = []  # list_subitems 的權威完整清單（列舉題確定性作答）
+    call_counts: Dict[str, int] = {}  # 「工具+參數」→ 次數，偵測空轉（見迴圈內註解）
+    forced_rag = False  # 空轉改派 rag_search 只做一次，再犯就直接收尾
     seed_conf: Optional[float] = None
     threshold = getattr(settings, "RAG_LOWCONF_CE_THRESHOLD", 0.15)
 
@@ -2042,9 +2082,37 @@ def run_agent(
             final_text = thought or "暫無足夠資訊"
             break
 
+        # ── 空轉偵測 ──────────────────────────────────────────
+        # 實測「ER PR是什麼」：spec_lookup 查無結果，模型連續 6 次發出一字不差的
+        # 呼叫直到燒完步數預算。observation 是空結果而非錯誤，模型看不出「再試
+        # 也一樣」。同一（工具+參數）第 2 次 → 不執行，改回一段明確的引導；
+        # 第 3 次 → 模型已卡死，直接改派 rag_search(原問題)，讓證據進得來。
+        call_key = f"{action}|{json.dumps(action_input or {}, ensure_ascii=False, sort_keys=True)}"
+        call_counts[call_key] = call_counts.get(call_key, 0) + 1
+        dup_guidance: Optional[Dict[str, Any]] = None
+        if call_counts[call_key] >= 3 and action != "rag_search":
+            # 改派也只給一次機會：改派後模型若仍在重複同一個呼叫，代表它已完全
+            # 卡死，繼續餵步數只是重跑一樣的檢索 —— 直接離開迴圈走最終合成
+            # （rag_evidence 已含 seed 檢索與改派那次的命中）。
+            if forced_rag:
+                yield {"type": "thought", "step": step,
+                       "text": "模型持續重複相同呼叫，提前結束工具迴圈，以既有證據合成答案。"}
+                break
+            forced_rag = True
+            yield {"type": "thought", "step": step,
+                   "text": f"偵測到 {action} 以相同參數重複呼叫，改用 rag_search 以原始問題全文檢索。"}
+            action, action_input = "rag_search", {"query": question, "top_k": 5}
+        elif call_counts[call_key] == 2:
+            dup_guidance = {"error": (
+                f"你已用完全相同的參數呼叫過 {action}，結果不會改變。"
+                "請改用其他工具或不同參數；若要查文件內容，用 rag_search 搭配使用者的原始問題。"
+                "若已有足夠資訊，直接輸出 final_answer。"
+            )}
+
         yield {"type": "tool_call", "step": step, "tool": action, "input": action_input}
 
-        observation = agent_tools.run_tool(db, action, action_input)
+        observation = dup_guidance if dup_guidance is not None \
+            else agent_tools.run_tool(db, action, action_input)
         yield {"type": "observation", "step": step, "tool": action, "output": observation}
 
         # Phase 0：累積證據供最後 grounded 合成

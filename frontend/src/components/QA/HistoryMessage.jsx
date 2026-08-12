@@ -22,7 +22,7 @@ const { Text } = Typography;
  * 不會在串流期間變動。
  */
 const HistoryMessage = memo(function HistoryMessage({
-  msg, index, expandedSnippets, onToggleSnippet, onPreviewPdf, onSaveNote, showDivider,
+  msg, index, expandedSnippets, onToggleSnippet, onPreviewPdf, onSaveNote, showDivider, onRequery,
 }) {
   return (
     <div style={{ marginBottom: 32 }}>
@@ -38,6 +38,19 @@ const HistoryMessage = memo(function HistoryMessage({
         {msg.optimized_query && msg.optimized_query !== msg.question && (
           <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #1890ff" }}>
             <Text type="secondary" style={{ fontSize: 13 }}>AI 理解：{msg.optimized_query}</Text>
+            {/* 改寫是在送出後才知道結果的（LLM 要 1-8 秒，沒辦法邊打字邊預覽），
+                所以控制權放在事後：看到改寫不對，一鍵用原問句重查。
+                比「送出前猜」準確得多，因為此時已經看得到實際查了什麼。 */}
+            {onRequery && (
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: "0 6px", fontSize: 12 }}
+                onClick={() => onRequery(msg.question)}
+              >
+                改用原問句重查
+              </Button>
+            )}
           </div>
         )}
       </div>

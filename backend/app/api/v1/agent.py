@@ -83,8 +83,13 @@ def agent_chat(
                 question=question, answer=final_text,
                 sources=final_sources, mode="agent",
             )
+            # 回報這次有沒有承接前文（見 agent.remember_resolved）——
+            # 前端的「追問」標籤要照這個顯示，而不是照它自己送出的旗標。
+            _rs = agent.get_resolved(db)
             yield _sse("done", {"ok": True,
-                                "conversation_id": saved.id if saved else None})
+                                "conversation_id": saved.id if saved else None,
+                                "is_followup": bool(_rs.get("rewritten")),
+                                "resolved_query": _rs.get("query") if _rs.get("rewritten") else None})
         except Exception as e:
             logger.error("agent stream failed: %s", e, exc_info=True)
             yield _sse("error", {"message": str(e)})
@@ -149,8 +154,11 @@ def agent_route(
                 question=question, answer=final_text,
                 sources=final_sources, mode=f"hybrid:{mode}",
             )
+            _rs = agent.get_resolved(db)
             yield _sse("done", {"ok": True, "mode": mode,
-                                "conversation_id": saved.id if saved else None})
+                                "conversation_id": saved.id if saved else None,
+                                "is_followup": bool(_rs.get("rewritten")),
+                                "resolved_query": _rs.get("query") if _rs.get("rewritten") else None})
         except Exception as e:
             logger.error("hybrid route failed: %s", e, exc_info=True)
             yield _sse("error", {"message": str(e)})
