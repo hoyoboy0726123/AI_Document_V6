@@ -199,10 +199,13 @@ def _guarantee_fused_top(candidates, result, top_n):
 
 
 # ── 對外入口 ─────────────────────────────────────────────────────────
-def rerank(query: str, candidates: List[Tuple[object, float]], top_n: int):
+def rerank(query: str, candidates: List[Tuple[object, float]], top_n: int,
+           kwonly: Optional[set] = None):
     """對 candidates=[(chunk, score)] 重排，回傳重排後的 [(chunk, score)]（最多 top_n）。
 
-    失敗時回傳原順序的前 top_n。
+    kwonly：candidates 中「純關鍵字命中（無向量分數）」的索引集合。這些塊是靠
+    trigram 子字串撈進來的，需通過 RAG_KWONLY_CE_MIN_SCORE 的 CE 門檻才能留下
+    （雙訊號候選不受此門檻影響）。失敗時回傳原順序的前 top_n。
     """
     if not candidates:
         return []
@@ -216,10 +219,17 @@ def rerank(query: str, candidates: List[Tuple[object, float]], top_n: int):
         scores = _score_cross_encoder(query, candidates)
         if scores is not None:
             min_score = getattr(settings, "RAG_RERANK_CE_MIN_SCORE", 0.0)
+            kw_min = getattr(settings, "RAG_KWONLY_CE_MIN_SCORE", None)
             ranked = [
                 (c, orig, scores[i], i)
                 for i, (c, orig) in enumerate(candidates)
             ]
+            if kwonly and kw_min is not None:
+                dropped = [r for r in ranked if r[3] in kwonly and r[2] < kw_min]
+                if dropped:
+                    logger.info("rerank: 丟棄 %d 個未過 CE 門檻(%.2f)的 keyword-only 候選",
+                                len(dropped), kw_min)
+                ranked = [r for r in ranked if not (r[3] in kwonly and r[2] < kw_min)] or ranked
             kept = [r for r in ranked if r[2] >= min_score] or ranked
             kept.sort(key=lambda r: (-r[2], r[3]))
             logger.info(

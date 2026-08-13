@@ -279,7 +279,8 @@ class DocumentChunkSource(BaseModel):
     title: str
     page: Optional[int] = None
     snippet: str
-    score: float
+    # None = 純關鍵字命中（無向量分數），前端顯示「關鍵字命中」而非 0.000
+    score: Optional[float] = None
 
 
 class ConversationMessage(BaseModel):

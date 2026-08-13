@@ -49,7 +49,7 @@ def norm(v: str) -> str:
 # 若要求「數值＋單位」的字串完全一致，會把答對的判成答錯。
 _UNIT_ALIASES = [
     ("m/s", ["米/秒", "公尺/秒", "米每秒"]),
-    ("mm", ["毫米", "公釐"]),
+    ("mm", ["毫米", "公釐", "millimeters", "millimeter"]),
     ("cm", ["公分", "厘米"]),
     ("g", ["克"]),
     ("kg", ["公斤", "千克"]),
@@ -76,8 +76,21 @@ def _numeric_core(v: str) -> str:
     for canon, zh in _UNIT_ALIASES:
         for z in zh:
             s = s.replace(norm(z), canon)
+    # 英文字數詞（gold "two millimeters" 這種寫法）
+    for w, d in (("one", "1"), ("two", "2"), ("three", "3"), ("four", "4"),
+                 ("five", "5"), ("six", "6"), ("seven", "7"), ("eight", "8"),
+                 ("nine", "9"), ("ten", "10")):
+        if s.startswith(w):
+            s = d + s[len(w):]
+            break
     m = re.match(r"^([\d.]+(?:±[\d.]+)?)", s)
     return m.group(1) if m else s
+
+
+# 單位夾在數值與 ± 中間會讓 core 比對失敗：答案寫「105 °C ± 2°C」，
+# gold 是「105 ± 2°C」→ core "105±2" 對不上 "105°c±2°c"。比對前把
+# 正規化後的單位符號整個拿掉，兩邊都變 "105±2"。
+_UNIT_STRIP_RE = re.compile(r"°c|°f|mm|cm|m/s|kg|%")
 
 
 # 「系統誠實表示查不到」的開場白。兜底訊息會引用最接近的原文片段，那些片段
@@ -94,12 +107,26 @@ def is_honest_no_answer(text: str) -> bool:
 
 
 def gold_hit(gold_list: list, text: str) -> bool:
-    """答案是否包含任一 gold 值（以數值主體比對，容許單位被翻譯或移位）。"""
+    """答案是否包含任一 gold 值（以數值主體比對，容許單位被翻譯或移位）。
+
+    三種比對，任一命中即過（只放寬不收緊——舊通過項不受影響）：
+      1. core 在正規化答案中（原本為）
+      2. core 在「去單位」答案中（解「105 °C ± 2°C」vs「105 ± 2°C」）
+      3. 整個正規化 gold 字串在答案中（解 core 鑑別力不足的字數詞 gold）
+    """
     t = norm(text)
     for canon, zh in _UNIT_ALIASES:
         for z in zh:
             t = t.replace(norm(z), canon)
-    return any(_numeric_core(g) and _numeric_core(g) in t for g in gold_list)
+    t_stripped = _UNIT_STRIP_RE.sub("", t)
+    for g in gold_list:
+        core = _numeric_core(g)
+        if core and (core in t or core in t_stripped):
+            return True
+        gn = norm(g)
+        if gn and gn in t:
+            return True
+    return False
 
 
 def gold_chunk_ids(con: sqlite3.Connection, golds: list) -> set:

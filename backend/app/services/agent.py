@@ -127,6 +127,11 @@ _VALUE_TOKEN_RE = re.compile(
     r"|pH\s*值?\s*[^\d\n]{0,8}\d",
     re.I,
 )
+# 版本／版次類前提（「第 12 版對無人機的專章」）。它不是數字+單位，
+# _VALUE_TOKEN_RE 抓不到，於是假版本的前提可以一路穿透到生成。本語料的
+# 版次全是字母（810H、331D），中文數字版次必然查無 → 一律標註是正確行為。
+_EDITION_TOKEN_RE = re.compile(
+    r"第\s*\d+\s*版|\d+\s*(?:th|st|nd|rd)?\s*(?:edition|version|revision)", re.I)
 # 「沒給數值」的典型措辭。實測補上原本漏掉的講法:
 # 「需根據運輸、儲存與部署時的氣候…來確定」（需/應 與 確定 之間可以很長）、
 # 「應選取最壞情況」、「可參考表 507.6-I」（只指路不給值）、「視情況而定」。
@@ -1032,7 +1037,9 @@ def _flag_unverified_premise(question: str, answer: Optional[str],
         return answer
     haystack = _norm_for_match(" ".join(c.get("text") or "" for c in contexts))
     unverified: List[str] = []
-    for m in _VALUE_TOKEN_RE.finditer(question):
+    import itertools
+    for m in itertools.chain(_VALUE_TOKEN_RE.finditer(question),
+                             _EDITION_TOKEN_RE.finditer(question)):
         # 必須連單位一起比對。只比裸數字沒有意義 ——「30」在任何一份規範裡
         # 都找得到（頁碼、其他參數、表格列號），於是假前提永遠「查得到依據」。
         token = _norm_for_match(m.group(0))

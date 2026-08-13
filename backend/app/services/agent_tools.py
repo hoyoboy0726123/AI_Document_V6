@@ -10,6 +10,7 @@ The LLM never sees raw SQL.
 """
 from __future__ import annotations
 
+import bisect
 import difflib
 import logging
 import re
@@ -66,7 +67,7 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
             "document_id": doc.id,
             "title": doc.title,
             "page": chunk.page,
-            "score": round(score, 4),
+            "score": round(score, 4) if score is not None else None,
             # 小找大：命中塊完整保留 + 鄰塊填補（與 RAG /query 一致），snippet 供 ReAct 推理與合成引用。
             "snippet": retrieval.expand_chunk_text(db, chunk, radius=radius, max_chars=expand_cap),
         })
@@ -590,7 +591,22 @@ def _tool_list_procedures(db: Session, params: Dict[str, Any]) -> Dict[str, Any]
         .order_by(models.DocumentChunk.page, models.DocumentChunk.chunk_index)
         .all()
     )
-    joined = "\n".join(ch.text or "" for ch in chunks)
+    # joined 內偏移 → 塊：供每個 Procedure 回報標題所在的 chunk_id，
+    # 讓 retrieval 的覆蓋補撈能直接取塊，不需再付一次檢索成本。
+    joined_parts: List[str] = []
+    offsets: List[int] = []   # offsets[i] = 第 i 塊在 joined 的起點
+    _off = 0
+    for ch in chunks:
+        offsets.append(_off)
+        t = ch.text or ""
+        joined_parts.append(t)
+        _off += len(t) + 1  # +1 = "\n"
+    joined = "\n".join(joined_parts)
+
+    def _chunk_at(pos: int):
+        idx = bisect.bisect_right(offsets, pos) - 1
+        return chunks[idx] if 0 <= idx < len(chunks) else None
+
     events = []  # (pos, kind, num, title)
     for m in re.finditer(r"\bMETHOD\s+(\d{3}\.\d{1,2})\b", joined, re.IGNORECASE):
         events.append((m.start(), "M", m.group(1), None))
@@ -603,16 +619,28 @@ def _tool_list_procedures(db: Session, params: Dict[str, Any]) -> Dict[str, Any]
     events.sort(key=lambda e: e[0])
     titles: Dict[str, str] = {}
     present: set = set()
+    tpos: Dict[str, int] = {}  # 標題事件位置（優先，指向程序本文開頭）
+    ppos: Dict[str, int] = {}  # 任一提及位置（後備）
     cur = None
     for _pos, kind, num, title in events:
         if kind == "M":
             cur = num
         elif cur == qnum:
             present.add(num)
-            if kind == "T" and (num not in titles or 0 < len(title) < len(titles.get(num) or "9" * 99)):
-                titles[num] = title
+            if num not in ppos:
+                ppos[num] = _pos
+            if kind == "T":
+                if num not in tpos:
+                    tpos[num] = _pos
+                if num not in titles or 0 < len(title) < len(titles.get(num) or "9" * 99):
+                    titles[num] = title
     nums = sorted(present | set(titles.keys()), key=_roman_to_int)
-    procs = [{"procedure": n, "title": titles.get(n, "")} for n in nums]
+    procs = []
+    for n in nums:
+        ch = _chunk_at(tpos.get(n, ppos.get(n, -1)))
+        procs.append({"procedure": n, "title": titles.get(n, ""),
+                      "page": ch.page if ch else None,
+                      "chunk_id": ch.id if ch else None})
     return {"matched": node.canonical_id, "name": node.name, "procedures": procs, "count": len(procs)}
 
 

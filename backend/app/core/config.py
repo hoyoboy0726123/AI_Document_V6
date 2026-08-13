@@ -209,6 +209,12 @@ class Settings(BaseSettings):
     # ＋ LLM 動態產生的查詢修正建議」。CE 不可用時此 gate 自動略過（不退化）。
     RAG_LOWCONF_CE_THRESHOLD: float = 0.15
     RAG_RERANK_CE_MIN_SCORE: float = 0.0        # cross-encoder 分數門檻（logit，>0 偏相關）
+    # keyword-only 候選（無向量分數、純字面命中）進最終 top_k 的 CE 門檻。
+    # 預設 None = 不啟用。注意 0.0 不是「關閉」—— CE 對相關塊打負 logit 很常見，
+    # 0.0 門檻仍會丟塊（實測 v02 鹽霧箱體溫度的正解就這樣從 rank 1 掉出 top5）。
+    # 另實測 CE 分不出真噪音：頁 437 數據表 CE 0.900 > u02 正解塊 0.475 ——
+    # 能殺噪音的門檻必先殺正解。保留機制供特定語料調整，沒有量測支持前不要開。
+    RAG_KWONLY_CE_MIN_SCORE: float | None = None
 
 
 

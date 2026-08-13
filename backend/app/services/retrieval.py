@@ -10,6 +10,7 @@ rag_search tool all call.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +33,8 @@ from . import ai, hybrid_search, rerank
 #     PAGE_GAP=15  兩題都進得去；30 / 60 沒有進一步差別
 #
 # 810H 單一 Method 常跨 20+ 頁，±5 的視窗對這種語料本來就太窄。
+logger = logging.getLogger(__name__)
+
 _PAGE_GAP = 15
 
 
@@ -57,6 +60,34 @@ def _join_dedup(a: str, b: str, max_overlap: int = 400) -> str:
     return a + "\n" + b
 
 
+_TAIL_BOUNDARY_CHARS = "。．！？!?;；\n"
+
+
+def _trim_partial_tail(text: str, max_cut: int = 150) -> str:
+    """截斷點落在句中時，收斂到最後一個完整句尾。
+
+    展開文字按字元上限硬切會產生「Step 1. Conduct a fixture mo」這種殘句，
+    而模型會忠實照抄殘句進答案（實測 514.8 流程題的表格 cell 就是這樣收尾）。
+    最多只往回退 max_cut 字：一個殘句的長度足矣。先前用「最後 30%」當範圍，
+    1750 字塊等於允許砍 525 字 —— 實測 v24/v30 的正解數值就在被砍掉的殘段裡，
+    數值落地率掉了 0.1。殺殘句不值得賠掉數值。
+    """
+    # 結尾是句點也視為完整（無論真句尾或小數點，都不值得再往回砍）
+    if not text or text[-1] in _TAIL_BOUNDARY_CHARS or text[-1] == ".":
+        return text
+    floor = max(0, len(text) - max_cut)
+    # 從倒數第二個字元開始：句點分支要看 text[i+1]，從最後一個開始會越界
+    #（實測 IndexError 讓 context 組裝整個炸掉，評測三題直接「執行失敗」）
+    for i in range(len(text) - 2, floor, -1):
+        ch = text[i]
+        if ch in _TAIL_BOUNDARY_CHARS:
+            return text[: i + 1]
+        # 英文句號要求後接空白，避免把 514.8 這種小數點當句尾
+        if ch == "." and text[i + 1] in " \t":
+            return text[: i + 1]
+    return text
+
+
 def expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> str:
     """小找大：命中塊「完整保留」+ 同文件前後 radius 塊只填剩餘預算，合併去重。
 
@@ -66,7 +97,7 @@ def expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> str
     """
     base = chunk.text or ""
     if radius <= 0 or len(base) >= max_chars:
-        return base[:max_chars]
+        return _trim_partial_tail(base[:max_chars]) if len(base) > max_chars else base
     rows = (
         db.query(models.DocumentChunk)
         .filter(
@@ -83,13 +114,17 @@ def expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> str
     nxt = next((r.text or "" for r in rows if r.chunk_index == hi + 1), "")
     prv = next((r.text or "" for r in rows if r.chunk_index == hi - 1), "")
     result = base
+    cut = False  # 尾端是否發生過硬切（切齊上限時長度不會超過 max_chars，比不出來）
     rem = max_chars - len(result)
     if rem > 0 and nxt:
+        cut = len(nxt) > rem
         result = _join_dedup(result, nxt[:rem])
     rem = max_chars - len(result)
     if rem > 0 and prv:
         result = _join_dedup(prv[-rem:], result)
-    return result[:max_chars]
+    if len(result) > max_chars:
+        result, cut = result[:max_chars], True
+    return _trim_partial_tail(result) if cut else result
 
 
 def context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
@@ -106,7 +141,8 @@ def context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
     radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
     per_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2000)
     if radius <= 0 or remaining <= len(base):
-        return base[:remaining]  # 截斷到剩餘額度（原本回傳整塊 → 溢出 bug）
+        # 截斷到剩餘額度（原本回傳整塊 → 溢出 bug），並收斂到句尾
+        return _trim_partial_tail(base[:remaining]) if len(base) > remaining else base
     return expand_chunk_text(db, chunk, radius=radius, max_chars=min(per_cap, remaining))
 
 
@@ -260,6 +296,60 @@ def resolve_spec_docs(db: Session, question: str) -> Tuple[str, List[str]]:
     return (stripped or question), doc_ids
 
 
+# 程序覆蓋補撈的觸發條件：問的是「怎麼做／流程／程序」且點名了方法號。
+# 沒點名方法號就不觸發（無從界定範圍），維持現狀、不產生新誤擋。
+_PROC_INTENT_RE = re.compile(
+    r"程序|流程|步驟|怎麼進行|如何進行|怎麼做|怎麼執行|"
+    r"procedures?|how\s+(?:to\s+)?(?:conduct|perform|run|carry)",
+    re.I,
+)
+_METHOD_NUM_IN_QUERY_RE = re.compile(r"\b(\d{3}\.\d{1,2})\b")
+_FILL_MAX_CHUNKS = 4
+
+
+def _fill_procedure_coverage(db: Session, query: str, selected, *,
+                             document_id: Optional[str] = None):
+    """程序類問題的 enumerate-then-fill。
+
+    先用 KG+方法內文掃出該方法的 Procedure I…N 完整清單（list_procedures，
+    確定性、零 LLM 成本），再檢查已選塊的覆蓋：哪個 Procedure 連提都沒提 →
+    把它標題所在的那一塊直接補進來（塊 id 是掃描時記下的，不需再檢索）。
+    實測「Method 514.8 的測試流程」原本只覆蓋 I–III，Procedure IV 的內文塊
+    排在 top_k 外，答案只能寫「未完整提供內容」。
+    """
+    if not selected or not _PROC_INTENT_RE.search(query or ""):
+        return selected
+    if not _METHOD_NUM_IN_QUERY_RE.search(query or ""):
+        return selected
+    from . import agent_tools  # 延遲載入避免循環匯入（agent_tools 匯入 retrieval）
+    pr = agent_tools.run_tool(db, "list_procedures", {"name": query})
+    procs = (pr or {}).get("procedures") if isinstance(pr, dict) else None
+    if not procs:
+        return selected
+    joined = "\n".join((c.text or "") for c, _s in selected)
+    have_ids = {c.id for c, _s in selected}
+    added = 0
+    for p in procs:
+        if added >= _FILL_MAX_CHUNKS:
+            break
+        num = p.get("procedure")
+        cid = p.get("chunk_id")
+        if not num or not cid or cid in have_ids:
+            continue
+        # \b 擋不住羅馬數字前綴（I 會命中 II），用否定 lookahead
+        if re.search(rf"Procedure\s+{num}(?![IVX])", joined, re.I):
+            continue
+        chunk = db.query(models.DocumentChunk).filter(models.DocumentChunk.id == cid).first()
+        if not chunk or (document_id and chunk.document_id != document_id):
+            continue
+        selected = list(selected) + [(chunk, None)]
+        have_ids.add(cid)
+        joined += "\n" + (chunk.text or "")
+        added += 1
+        logger.info("程序覆蓋補撈：Procedure %s（頁 %s）補進候選", num, chunk.page)
+    return selected
+
+
 def hybrid_retrieve(
     db: Session,
     query: str,
@@ -326,10 +416,53 @@ def hybrid_retrieve(
             if page_counts.get(page_key, 0) >= _MAX_CHUNKS_PER_PAGE:
                 continue
             page_counts[page_key] = page_counts.get(page_key, 0) + 1
-        pool.append((chunk, vscore if vscore is not None else 0.0))
+        # keyword-only 命中保留 None 分數：它不是「相似度 0」，是「沒有向量分數」。
+        # 前端據此顯示「關鍵字命中」而非誤導性的 0.000；rerank 據此套 CE 門檻。
+        pool.append((chunk, vscore))
         if len(pool) >= pool_size:
             break
 
+    # 向量前 N 名保證進 rerank 池（只保證「被 CE 看到」，不保證排名）。
+    #
+    # RRF 的病灶：雙訊號候選哪怕兩邊都排第 50（2/110≈0.018），分數仍高於
+    # 純向量第 1 名（1/62≈0.016）。中翻英的檢索詞又廣（salt/test/temperature
+    # 到處命中），雙訊號候選輕易塞滿 12 格 —— 實測 v02 的正解是向量第 1 名
+    # （0.676、CE 0.998），卻連池都進不去。翻譯詞的細微漂移讓這類題在
+    # 「剛好擠進／剛好擠出」之間翻面，這裡直接把向量最強訊號釘進池底。
+    _VEC_TOP_GUARANTEE = 3
+    if rerank_on:
+        pool_ids = {c.faiss_id for c, _ in pool}
+        vec_top = sorted((x for x in fused if x[1] is not None),
+                         key=lambda x: -x[1])[:_VEC_TOP_GUARANTEE]
+        for rank_i, (fid, vscore) in enumerate(vec_top, 1):
+            if fid in pool_ids:
+                continue
+            ch = chunk_map.get(fid)
+            if not ch or _is_unreadable(ch.text):
+                continue
+            doc = ch.document
+            if document_id and doc.id != document_id:
+                continue
+            if classification_id and doc.classification_id != classification_id:
+                continue
+            if project_id and not _project_matches(doc.metadata_data or {}, project_id):
+                continue
+            if folder_ids and doc.folder_id not in folder_ids:
+                continue
+            pool.append((ch, vscore))
+            pool_ids.add(fid)
+            logger.info("向量第 %d 名（%.3f）被 RRF 擠出池外，保底放回 rerank 池", rank_i, vscore)
+
     if not rerank_on or len(pool) <= 1:
-        return pool[:top_k]
-    return rerank.rerank(query, pool, top_k)
+        selected = pool[:top_k]
+    else:
+        kwonly_idx = {i for i, (_c, s) in enumerate(pool) if s is None}
+        selected = rerank.rerank(query, pool, top_k, kwonly=kwonly_idx)
+
+    # 程序類問題的覆蓋補撈（enumerate-then-fill）：檢索按整體相關性排序，
+    # 不保證每個 Procedure 都有內文塊 → 「Procedure IV - 未完整提供內容」。
+    try:
+        selected = _fill_procedure_coverage(db, query, selected, document_id=document_id)
+    except Exception as e:  # noqa: BLE001 — 補撈失敗不可拖垮主檢索
+        logger.warning("procedure coverage fill failed: %s", e)
+    return selected
