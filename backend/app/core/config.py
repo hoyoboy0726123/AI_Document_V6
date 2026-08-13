@@ -156,6 +156,10 @@ class Settings(BaseSettings):
     # 設 8 秒會在「模型是冷的」時踩到（實測 qwen3:8b 光載入就約 6 秒），
     # 白白放棄本來有效的救援。逾時只是放棄、無其他副作用，故放寬到 15 秒。
     RAG_QUERY_TRANSLATE_TIMEOUT: int = 15
+    # 中翻英救援用的模型。None = 用主 LLM。主 LLM 是 gemma4:12b 這種較慢的模型時，
+    # 翻譯常撞 15 秒上限（實測 gemma 基線一輪就逾時 6 次），逾時 = 該查詢完全
+    # 失去 BM25 訊號。指定一個快的小模型（如 qwen3:8b）讓翻譯穩定在數秒內。
+    RAG_TRANSLATE_MODEL: str | None = None
     # 融合後餵進 LLM 的「context 塊數」上限。hybrid recall 高但塊一多就破碎，
     # 過多分散塊會讓生成退化；超出的命中仍會列在 sources（前端可預覽），只是不進 LLM context。
     RAG_MAX_CONTEXT_CHUNKS: int = 6

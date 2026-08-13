@@ -281,8 +281,12 @@ def _translate_for_keyword(query: str) -> str:
     from .llm_provider import get_llm_provider
 
     provider = get_llm_provider()
+    # 翻譯是輔助任務，不需要主 LLM 的品質；主 LLM 較慢（gemma4:12b）時
+    # 用 RAG_TRANSLATE_MODEL 指定的快模型，避免 15 秒逾時丟失 BM25 訊號。
+    _model = getattr(settings, "RAG_TRANSLATE_MODEL", None) or None
     raw = provider.chat(
         [{"role": "user", "content": _TRANSLATE_PROMPT.format(q=key)}],
+        model=_model,
         options={"temperature": 0.0, "num_ctx": 2048},
     )
     terms = " ".join(_EN_WORD_RE.findall(raw or ""))[:120]
