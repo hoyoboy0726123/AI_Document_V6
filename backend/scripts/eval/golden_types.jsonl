@@ -11,7 +11,7 @@
 {"id": "p01", "kind": "purpose", "q": "黴菌測試的目的是什麼", "gold": ["susceptibility", "fungal growth", "黴菌"], "min_hit": 1, "note": "METHOD 508.8 1.1 Purpose，中英擇一即可"}
 {"id": "p02", "kind": "purpose", "q": "鹽霧測試是為了確認什麼", "gold": ["protective coating", "finish", "保護塗層", "鍍層", "防蝕"], "min_hit": 1, "note": "METHOD 509.7 1.1"}
 {"id": "p03", "kind": "purpose", "q": "淋雨測試想驗證的是什麼", "gold": ["penetration of water", "protective cover", "防水", "滲入", "密封"], "min_hit": 1, "note": "METHOD 506.6 1.1"}
-{"id": "p04", "kind": "purpose", "q": "MIL-STD-810H 這份規範的適用範圍是什麼", "gold": ["environmental", "環境", "tailoring", "剪裁", "life cycle", "壽命週期"], "min_hit": 2, "note": "Part One scope"}
+{"id": "p04", "kind": "purpose", "q": "MIL-STD-810H 這份規範的適用範圍是什麼", "gold": ["environmental", "環境", "tailoring", "剪裁", "life cycle", "壽命週期", "生命週期"], "min_hit": 2, "note": "Part One scope"}
 {"id": "x01", "kind": "cross_method", "q": "淋雨測試的鹽溶液濃度規定是多少", "gold": [], "note": "METHOD 506.6 全文 0 次出現 salt —— 正確行為是說淋雨測試沒有這項規定，不得引用 509.7 鹽霧的濃度", "forbidden": ["鹽溶液", "salt solution", "比重", "specific gravity"]}
 {"id": "x02", "kind": "cross_method", "q": "黴菌測試的鹽霧沉降率是多少", "gold": [], "note": "METHOD 508.8 全文 0 次出現 fallout —— 不得引用 509.7 的沉降率", "forbidden": ["沉降", "fallout", "ml/cm"]}
 {"id": "x03", "kind": "cross_method", "q": "沙塵測試要求的黴菌培養菌種有哪些", "gold": [], "note": "沙塵測試沒有菌種規定 —— 這正是先前實測發生過的污染方向", "forbidden": ["菌種", "fungal species", "Aspergillus", "黴菌"]}

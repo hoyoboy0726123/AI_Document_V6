@@ -1693,6 +1693,15 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
         logger.info("比較題分頭檢索：%d 份規範，各取 %d 塊，共 %d 塊",
                     len(spec_docs), per_doc, len(filtered))
     else:
+        # 問句點名「恰好一份」規範 → 鎖定該文件檢索。/rag/query 端點一直有這個
+        # 行為（resolve_spec_scope），混合路由的 RAG 分支漏了 —— 實測 p04
+        # 「MIL-STD-810H 的適用範圍」第 1 名來源是 MIL-HDBK-310，答案把 310 的
+        # 限制事項安到 810H 頭上。關係題不鎖：「A 被哪些 810H 方法引用」的
+        # 「810H」常解析不出來（縮寫），鎖到 A 會把另一邊的證據全擋掉。
+        if (len(spec_docs) == 1 and not scope.get("document_id")
+                and not _RELATION_RE.search(question)):
+            scope = {**scope, "document_id": spec_docs[0]}
+            logger.info("問句點名單一規範，檢索鎖定該文件：%s", spec_docs[0][:8])
         filtered = retrieval.hybrid_retrieve(db, question, embeddings[0], top_k, **scope)
     if not filtered:
         return [], None
