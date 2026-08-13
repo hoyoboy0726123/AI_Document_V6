@@ -161,6 +161,7 @@ def query_rag(
 
     # 頁距過濾（智慧 + 塌縮保護）：命中集中才套用；分散/主命中離群則全納入。
     primary_page = filtered[0][0].page or 0
+    primary_doc_id = filtered[0][0].document_id
     keep_ids = _context_keep_ids(filtered)
 
     contexts: List[Dict[str, str]] = []
@@ -169,7 +170,10 @@ def query_rag(
     for chunk, score in filtered:
         doc = chunk.document
         chunk_page = chunk.page or 0
-        page_gap = abs(chunk_page - primary_page) if primary_page and chunk_page else None
+        # 跨文件頁碼不可比，頁距只在同一份文件內計算（見 agent.py 同名修正）
+        page_gap = (abs(chunk_page - primary_page)
+                    if primary_page and chunk_page
+                    and chunk.document_id == primary_doc_id else None)
 
         source_num = len(sources) + 1  # 1-based index matching frontend display order
         sources.append(
@@ -299,6 +303,7 @@ def query_stream(
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     primary_page = filtered[0][0].page or 0
+    primary_doc_id = filtered[0][0].document_id
     keep_ids = _context_keep_ids(filtered)
 
     contexts: List[Dict[str, str]] = []
@@ -307,7 +312,10 @@ def query_stream(
     for chunk, score in filtered:
         doc = chunk.document
         chunk_page = chunk.page or 0
-        page_gap = abs(chunk_page - primary_page) if primary_page and chunk_page else None
+        # 跨文件頁碼不可比，頁距只在同一份文件內計算（見 agent.py 同名修正）
+        page_gap = (abs(chunk_page - primary_page)
+                    if primary_page and chunk_page
+                    and chunk.document_id == primary_doc_id else None)
         source_num = len(sources) + 1
         sources.append(schemas.DocumentChunkSource(
             document_id=doc.id, title=doc.title, page=chunk.page,

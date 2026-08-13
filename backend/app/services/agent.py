@@ -1160,7 +1160,12 @@ def _synthesize_grounded(
     # 「標記⚠️頁距的來源極可能屬於不同測試項目…優先捨棄」的防污染規則
     # 在 agent 模式下是死的 —— 而 agent 恰恰最需要它：證據來自 seed 檢索、
     # LLM 自由 rag_search、補查、KG 子項四個來源混合，頁碼跨度遠大於純 RAG。
-    primary_page = next((e.get("page") for e, _ in deduped if e.get("page")), None)
+    # 頁距只在「同一份文件」內才有意義：跨文件的頁碼不可比（331D 頁134 vs
+    # 810H 頁259 差 125，卻可能都在講鹽霧），標了⚠️會讓模型套用「優先捨棄」
+    # 規則，把另一份文件的正確表格壓縮成一句「可參考」。跨文件 → gap=None。
+    _prim = next(((e.get("page"), e.get("document_id"))
+                  for e, _ in deduped if e.get("page")), (None, None))
+    primary_page, primary_doc = _prim
     for ev, text in deduped:
         if used + len(text) > budget:
             text = text[: max(0, budget - used)]
@@ -1172,7 +1177,8 @@ def _synthesize_grounded(
             "title": ev.get("title") or "",
             "page": ev_page,
             "page_gap": (abs(ev_page - primary_page)
-                         if primary_page and ev_page else None),
+                         if primary_page and ev_page
+                         and ev.get("document_id") == primary_doc else None),
             "text": text,
         })
         used_sources.append({
