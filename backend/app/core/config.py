@@ -34,6 +34,22 @@ class Settings(BaseSettings):
     OLLAMA_EMBED_MODEL: str = "quentinz/bge-large-zh-v1.5:latest"
     OLLAMA_KEEP_ALIVE: str = "5m"
     OLLAMA_TIMEOUT: int = 120  # seconds
+    # 同時允許幾個 LLM 請求進 Ollama（1 = 完全序列化，後來者排隊）。
+    #
+    # 為什麼預設 1：小顯存機器上兩個生成請求重疊時，Ollama 會改變模型的
+    # GPU/CPU 層切分比例（實測 8GB 卡上模型本來就會溢位到 CPU）。CPU 與 GPU
+    # 的浮點運算有細微差異，第一個 token 的選擇一旦翻轉，整段輸出就發散 ——
+    # `temperature=0` + `seed` 都救不了，因為輸入雖同、運算路徑已不同。
+    #
+    # 實測後果不是「偶爾答錯」而是「掉進另一個穩定點並持續」：同一題原本
+    # 1435 字含 3 張表，並行干擾後變成 855 字 0 張表，而且之後每次都一樣，
+    # 看起來像系統本來就這樣。要重啟服務並卸載模型才會回來。
+    #
+    # 序列化的代價是併發時要排隊，但 8GB 卡本來就沒有真正的併發能力 ——
+    # 兩個請求並行只會一起變慢又互相污染。排隊反而總吞吐更好且結果正確。
+    #
+    # 換更大的顯卡（模型能完全常駐 GPU、不溢位）後可在管理介面調高。
+    OLLAMA_MAX_CONCURRENCY: int = 1
     # Optional generation controls (help avoid truncated answers)
     # -1 for unlimited tokens (Ollama default); increase context for long PDFs
     OLLAMA_NUM_PREDICT: int | None = -1
@@ -91,6 +107,26 @@ class Settings(BaseSettings):
     # 部署的 qwen3-embedding 上下文遠大於此，設 2000 可完整涵蓋 1800 字 chunk。
     # 若改用 bge-large 等 512-token 模型，請在 .env 把此值調回 ~450。
     EMBEDDING_MAX_CHARS: int = 2000
+    # 嵌入模型釘在 CPU，把顯卡讓給生成模型獨佔。
+    #
+    # RAG 每一輪都是「先嵌入問句、再生成答案」。小顯存機器上兩者塞不下就會
+    # 互相驅逐 —— 實測 8GB 卡跑 qwen3:8b @ num_ctx=8192 要 6.2GB，連 0.66GB
+    # 的 bge-m3 都擠不進去，`ollama ps` 可見每題發生兩次驅逐（嵌入把 LLM 踢掉、
+    # 生成再把嵌入踢掉），等於每題重載一次 6.2GB 的生成模型。
+    #
+    # 判斷依據是「重載成本」而非模型本身的推理速度：嵌入只處理一個短問句，
+    # 工作量小，在 CPU 上暖機後約 340ms；生成模型重載一次卻要 12~20 秒。
+    #
+    # golden set 驗證（scripts/eval/run_eval_unit0.py，13 題）：
+    #   釘 CPU  總分 0.667  耗時 276.8s
+    #   走 GPU  總分 0.667  耗時 359.5s
+    # 逐題分數完全相同、答案長度幾乎一致 —— 純速度改善，每題平均省 6.4 秒。
+    #
+    # 24GB 以上、兩個模型能同時常駐的機器可設為 False。
+    # auto = 依 LLM_PROVIDER 判斷：生成在本地 ollama 時把嵌入趕到 CPU（兩者
+    # 搶同一張卡會互相驅逐，每題多付一次 12-20 秒的模型重載）；生成在雲端時
+    # 顯卡沒人跟它搶，嵌入走 GPU 更快。
+    EMBEDDING_DEVICE: str = "auto"          # auto | cpu | gpu
     # VL 視覺模型(目前只支援 ollama;Gemini vision 走 LLM_PROVIDER 那條)
     VISION_PROVIDER: str = "ollama"
     VISION_MODEL: str | None = None            # 覆寫 OLLAMA_VISION_MODEL;留空則沿用
@@ -191,6 +227,17 @@ class Settings(BaseSettings):
     #     snippet 500  / pool 24   hit@5 0.433  MRR 0.300   <- 少 9 題
     # reranker 先前不是弱，是被餓著（平均塊長 1465，卻只餵它 500 字元）。
     RAG_RERANK_POOL: int = 12
+    # 引用事後校驗：答案生成後比對每個 [來源N] 段落與該來源內容的詞重疊，
+    # 錯標且「有明確更佳來源」時改標。只動引用標記、不碰答案內容 ——
+    # 確定性字串比對，同輸入同輸出（services/citation_check.py）。
+    # 為什麼需要：7B 模型不做逐段歸屬，實測「buying mode有幾種」四個條目
+    # 全標 [來源4]（類別代號表），內容其實在來源 2（BUYING MODE 切片）。
+    # 引用錯誤比答錯更難察覺：使用者點開來源想驗證，看到不相關內容，
+    # 反而以為答案是編的。
+    # auto = 依 LLM_PROVIDER 判斷：本地 ollama（小模型會把整段答案套同一個
+    # 來源編號）才啟用；雲端模型實測引用歸屬正確，開了只是多花時間。
+    # 也可硬設 True/False 覆寫。
+    RAG_CITATION_CHECK: str = "auto"        # auto | true | false
     RAG_RERANK_MIN_SCORE: int = 3               # LLM 後端：低於此分（0-10）視為不相關，剔除
     # rerank 後端：cross_encoder（專門模型，CPU，~1-3s，建議）／ llm（用 gemma 打分，慢 ~100s）。
     # cross_encoder 載入失敗會自動退回 llm。
@@ -259,3 +306,24 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def citation_check_enabled() -> bool:
+    """引用事後校驗是否啟用（auto 時只在本地 ollama 生成下啟用）。"""
+    v = str(getattr(settings, "RAG_CITATION_CHECK", "auto") or "auto").lower()
+    if v in ("true", "1", "yes"):
+        return True
+    if v in ("false", "0", "no"):
+        return False
+    return (getattr(settings, "LLM_PROVIDER", "ollama") or "ollama") == "ollama"
+
+
+def embedding_on_cpu() -> bool:
+    """嵌入是否釘在 CPU（auto 時只在本地 ollama 生成下釘 CPU）。"""
+    v = str(getattr(settings, "EMBEDDING_DEVICE", "auto") or "auto").lower()
+    if v == "cpu":
+        return True
+    if v == "gpu":
+        return False
+    return (getattr(settings, "LLM_PROVIDER", "ollama") or "ollama") == "ollama"
+

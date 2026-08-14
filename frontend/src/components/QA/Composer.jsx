@@ -7,12 +7,18 @@ const { TextArea } = Input;
 /**
  * 合併後的單一輸入框（V6）。
  *
- * 取代原本「左側＝新問題、右下＝追問」的兩個框。判斷交給後端的
- * /rag/followup-check（純規則、不呼叫 LLM），結果顯示成一個可以按掉的標籤。
+ * 取代原本「左側＝新問題、右下＝追問」的兩個框。
+ *
+ * 有歷史時預設為「追問」：完整歷史交給後端，由 resolve_query 無條件改寫
+ * （不再前端分類 —— 分類有門檻、門檻會錯）。但改寫無條件不代表永遠正確，
+ * 所以狀態要顯示成一個可以按掉的標籤。
  *
  * 為什麼標籤一定要能按掉：任何自動判斷都會有漏網。實測「冷凝測試方法與條件」
  * 曾被誤判成追問而繼承上一輪的「濕度」去查。使用者要能在送出前就看到並否決，
- * 而不是送出後才發現查錯對象。
+ * 而不是送出後才發現查錯對象。按成「新問題」時不帶歷史送出，後端就不會改寫。
+ *
+ * 沒有歷史時（對話的第一題）不顯示標籤，也一律以 isFollowup=false 送出 ——
+ * 先前寫死 true，導致新對話的第一題也被標成「追問」。
  *
  * 自持輸入狀態（不把 value 提到父層）：串流生成時父層每個 token 都重繪，
  * 打字會嚴重延遲 —— 這是 V5 already 修過的問題，不要退回去。
@@ -27,12 +33,19 @@ const Composer = memo(function Composer({
   hasHistory,
 }) {
   const [value, setValue] = useState("");
+  // 追問 / 新問題的使用者覆寫。預設為追問（有歷史時），送出後復位 ——
+  // 「這一題換主題」是單題決定，不該黏著到後續每一題（換了主題之後，
+  // 新主題的後續提問本來就該是追問）。
+  const [followup, setFollowup] = useState(true);
+  const isFollowup = hasHistory && followup;
+
   const submit = useCallback(() => {
     const text = value.trim();
     if (!text || loading) return;
-    onSubmit(text);
+    onSubmit(text, hasHistory && followup);
     setValue("");
-  }, [value, loading, onSubmit]);
+    setFollowup(true);
+  }, [value, loading, onSubmit, hasHistory, followup]);
 
   return (
     <div className="composer">
@@ -50,6 +63,28 @@ const Composer = memo(function Composer({
               onClick={onOpenSettings}
             >
               已鎖定：{qaMode === "agent" ? "Agent" : "純 RAG"}
+            </Tag>
+          </Tooltip>
+        )}
+        {/* 追問／新問題的可覆寫標籤。
+            改寫是無條件的，但無條件不等於永遠正確 —— 實測「冷凝測試方法與條件」
+            曾被當成追問而繼承上一輪的「濕度」去查。使用者要能在「送出前」就看到
+            現在是哪個狀態並改掉，而不是送出後才發現查錯對象。 */}
+        {hasHistory && (
+          <Tooltip
+            title={
+              isFollowup
+                ? "目前會承接前文：系統會用上一題的主體補全這一題再去查。點一下改成「新問題」，原字送出、不加工。"
+                : "目前不承接前文：原字送出、不做改寫。點一下改回「追問」。"
+            }
+          >
+            <Tag
+              className="composer-tag composer-state"
+              color={isFollowup ? "orange" : "green"}
+              bordered={false}
+              onClick={() => setFollowup((v) => !v)}
+            >
+              {isFollowup ? "追問（承接前文）" : "新問題（不加工）"}
             </Tag>
           </Tooltip>
         )}
@@ -95,7 +130,9 @@ const Composer = memo(function Composer({
       <div className="composer-hint">
         Enter 送出 · Shift+Enter 換行
         {hasHistory
-          ? " · 承接前文時系統會自動補上主體，想重新開始請按「＋ 新對話」"
+          ? (isFollowup
+              ? " · 目前為追問，系統會用前文補上主體；點上方標籤可改成「新問題」原字送出"
+              : " · 目前為新問題，原字送出不加工；點上方標籤可改回「追問」")
           : " · 這是本對話的第一題"}
       </div>
     </div>

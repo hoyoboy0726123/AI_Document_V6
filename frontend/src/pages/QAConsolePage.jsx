@@ -241,6 +241,22 @@ const QAConsolePage = () => {
     }
   }, [loadConversations, openConversation]);
 
+  // 批次刪除（側邊欄多選）。失敗時 throw —— 側邊欄靠它決定要不要保留選取狀態，
+  // 靜默吞掉的話使用者會以為刪成功了、選取也被清掉，無從重試。
+  const handleBatchDeleteConversations = useCallback(async (ids) => {
+    try {
+      const resp = await apiClient.post("rag/conversations/batch-delete", { ids });
+      const wasActive = ids.includes(activeConvIdRef.current);
+      if (wasActive) activeConvIdRef.current = null;
+      const next = await loadConversations();
+      if (wasActive) await openConversation(next);
+      message.success(`已刪除 ${resp.data?.deleted ?? ids.length} 條對話`);
+    } catch (err) {
+      message.error("批次刪除失敗");
+      throw err;
+    }
+  }, [loadConversations, openConversation]);
+
   // 這裡原本有一個「conversationHistory 一變就 PUT 整包」的自動存檔。
   // 多對話串下那是有害的：PUT 打的是「最近更新的那一條」，切到別條對話
   // 再問一題就會把它整包覆蓋掉。三種查詢模式現在都在後端各自 append
@@ -466,6 +482,7 @@ const QAConsolePage = () => {
     setStreaming({
       question, thinking: "", answer: "", isStreaming: true, thinkingDone: false,
       sources: [], agentMode: true, hybrid: true, routedMode: null, agentSteps: [],
+      is_followup: isFollowup, optimized_query: null,
     });
     const historyForAgent = isFollowup
       ? conversationHistory.map((m) => ({ question: m.question, answer: m.answer }))
@@ -489,7 +506,17 @@ const QAConsolePage = () => {
           setStreaming((prev) => prev ? { ...prev, agentSteps: [...(prev.agentSteps || []), { event: eventName, ...data }] } : null);
         },
         onFinal: (data) => {
-          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true, sourcesPreliminary: false } : null);
+          // 混合模式先前不回傳 optimized_query，於是「AI 理解：xxx」在預設模式下
+          // 永遠不顯示 —— 使用者看不到系統實際拿去查的字串是什麼。
+          // sourcesPreliminary 取消：先行來源已被最終來源取代。
+          setStreaming((prev) => prev ? {
+            ...prev,
+            answer: data.text || "",
+            sources: data.sources || [],
+            optimized_query: data.rewritten ? (data.optimized_query || null) : null,
+            thinkingDone: true,
+            sourcesPreliminary: false,
+          } : null);
         },
         onDone: (doneEvt) => {
           syncConversationId(doneEvt);
@@ -497,8 +524,12 @@ const QAConsolePage = () => {
           if (prev) {
             const newMsg = {
               question: prev.question, answer: prev.answer, sources: prev.sources || [],
+              // is_followup 必須用後端回報的實際改寫結果：前端那個旗標現在恆為
+              // true（一律送完整歷史由後端判斷），照它顯示會讓新對話的第一題
+              // 也被標成「追問」。
               is_followup: Boolean(doneEvt?.is_followup),
-              optimized_query: doneEvt?.resolved_query || null, thinking: "", suggested_questions: [],
+              optimized_query: prev.optimized_query ?? doneEvt?.resolved_query ?? null,
+              thinking: "", suggested_questions: [],
               used_ai_fallback: false, agentMode: prev.routedMode === "agent", hybrid: true,
               routedMode: prev.routedMode, agentSteps: prev.agentSteps || [], timestamp: new Date().toISOString(),
             };
@@ -538,6 +569,9 @@ const QAConsolePage = () => {
           setStreaming((prev) =>
             prev ? {
               ...prev,
+              // 引用事後校驗若修正了 [來源N] 編號，後端會附上完整修正版；
+              // 串流已逐字送出收不回來，這裡整段替換（只有編號變，內容不變）。
+              answer: event.corrected_answer || prev.answer,
               sources: event.sources ?? [],
               is_followup: event.is_followup ?? false,
               optimized_query: event.optimized_query ?? null,
@@ -598,11 +632,14 @@ const QAConsolePage = () => {
     return submitRef.current?.(originalQuestion, false);
   }, []);
 
-  const handleComposerSubmit = useCallback((question) => {
-    // 一律當作「同一條對話的延續」送出：完整歷史交給後端，由 resolve_query
-    // 決定要不要改寫。前端不再自己判斷 —— 分類有門檻、門檻會錯，
-    // 而使用者不該為了問問題去理解這個機制。開新主題請按「＋ 新對話」。
-    return submitRef.current?.(question, true);
+  const handleComposerSubmit = useCallback((question, isFollowup) => {
+    // 預設仍是「同一條對話的延續」：完整歷史交給後端，由 resolve_query 決定
+    // 怎麼改寫。前端不自己做分類判斷 —— 分類有門檻、門檻會錯。
+    //
+    // 但 isFollowup 改由 Composer 傳入而非寫死 true，因為：
+    //   1. 寫死 true 會讓「新對話的第一題」也被標成追問（沒有前文可承接）
+    //   2. 使用者要能覆寫 —— 改寫無條件執行，偶爾會把新主題誤接到舊主題上
+    return submitRef.current?.(question, Boolean(isFollowup));
   }, []);
 
 
@@ -848,6 +885,7 @@ const QAConsolePage = () => {
               onRename={handleRenameConversation}
               onTogglePin={handleTogglePin}
               onDelete={handleDeleteConversation}
+              onBatchDelete={handleBatchDeleteConversations}
             />
           </Card>
         </Col>
@@ -904,11 +942,17 @@ const QAConsolePage = () => {
                         </Tag>
                       )}
                       <Text strong style={{ fontSize: 16, marginLeft: 8 }}>{streamingMsg.question}</Text>
-                      {streamingMsg.optimized_query && streamingMsg.optimized_query !== streamingMsg.question && (
+                      {/* 與 HistoryMessage 一致：有改寫顯示 AI 理解，追問未改寫則明示以原句檢索
+                          （後者要等 final/sources 事件回來才確定，故加 thinkingDone 條件） */}
+                      {streamingMsg.optimized_query && streamingMsg.optimized_query !== streamingMsg.question ? (
                         <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #1890ff" }}>
                           <Text type="secondary" style={{ fontSize: 13 }}>AI 理解：{streamingMsg.optimized_query}</Text>
                         </div>
-                      )}
+                      ) : (streamingMsg.is_followup && streamingMsg.thinkingDone ? (
+                        <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #d9d9d9" }}>
+                          <Text type="secondary" style={{ fontSize: 13 }}>以原句檢索（未改寫）</Text>
+                        </div>
+                      ) : null)}
                     </div>
                     <Card size="small" style={{ background: "#f9f9f9", borderLeft: streamingMsg.agentMode ? "4px solid #1677ff" : "4px solid #52c41a" }}>
                       {/* Agent steps timeline (when in agent mode) */}
@@ -928,7 +972,11 @@ const QAConsolePage = () => {
                           </Text>
                         )}
                       </div>
-                      {streamingMsg.thinkingDone && renderSources(streamingMsg.sources, "live", expandedSnippets, toggleSnippet, openPdfPreview)}
+                      {/* 先行來源（答案還沒到）展開讓等待期間有原文可讀，
+                          答案一到就收折 —— 見 renderSources 的 defaultOpen。 */}
+                      {streamingMsg.thinkingDone && renderSources(
+                        streamingMsg.sources, "live", expandedSnippets, toggleSnippet,
+                        openPdfPreview, Boolean(streamingMsg.sourcesPreliminary))}
                     </Card>
                   </div>
                 )}

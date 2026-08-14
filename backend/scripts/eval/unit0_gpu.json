@@ -1,0 +1,130 @@
+{
+  "label": "嵌入走GPU（原行為）",
+  "n": 13,
+  "overall": 0.667,
+  "by_kind": {
+    "coverage": 0.734,
+    "exact": 0.6,
+    "absent": 0.667
+  },
+  "total_seconds": 359.5,
+  "per_question": [
+    {
+      "id": "u01",
+      "kind": "coverage",
+      "q": "料件有哪些種類",
+      "score": 0.545,
+      "detail": "12/22",
+      "answer_len": 1482,
+      "seconds": 48.9
+    },
+    {
+      "id": "u02",
+      "kind": "exact",
+      "q": "大類代碼 10 代表哪一種料件",
+      "score": 1.0,
+      "detail": "正確",
+      "answer_len": 428,
+      "seconds": 29.3
+    },
+    {
+      "id": "u03",
+      "kind": "exact",
+      "q": "類別代號 0A 代表什麼",
+      "score": 1.0,
+      "detail": "正確",
+      "answer_len": 173,
+      "seconds": 21.0
+    },
+    {
+      "id": "u04",
+      "kind": "exact",
+      "q": "BATTERY 的類別代號是什麼",
+      "score": 0.0,
+      "detail": "缺 1 項",
+      "answer_len": 111,
+      "seconds": 19.8
+    },
+    {
+      "id": "u05",
+      "kind": "exact",
+      "q": "I/O MODULE 的類別代號是什麼",
+      "score": 0.0,
+      "detail": "缺 1 項",
+      "answer_len": 179,
+      "seconds": 21.0
+    },
+    {
+      "id": "u06",
+      "kind": "exact",
+      "q": "新版原物料料號總共幾碼",
+      "score": 1.0,
+      "detail": "正確",
+      "answer_len": 228,
+      "seconds": 45.4
+    },
+    {
+      "id": "u07",
+      "kind": "coverage",
+      "q": "新舊原物料編碼原則有什麼差異",
+      "score": 1.0,
+      "detail": "3/3",
+      "answer_len": 203,
+      "seconds": 25.6
+    },
+    {
+      "id": "u08",
+      "kind": "coverage",
+      "q": "料號的 AA、BBB、CC 各代表什麼",
+      "score": 1.0,
+      "detail": "3/3",
+      "answer_len": 66,
+      "seconds": 19.8
+    },
+    {
+      "id": "u09",
+      "kind": "coverage",
+      "q": "原物料依功能分成哪幾類",
+      "score": 0.125,
+      "detail": "1/8",
+      "answer_len": 1245,
+      "seconds": 43.8
+    },
+    {
+      "id": "u10",
+      "kind": "coverage",
+      "q": "筆記型電腦拆解後有哪些主要組件",
+      "score": 1.0,
+      "detail": "9/9",
+      "answer_len": 519,
+      "seconds": 27.4
+    },
+    {
+      "id": "u11",
+      "kind": "absent",
+      "q": "這份文件規定的產品保固年限是幾年",
+      "score": 0.0,
+      "detail": "未拒答（可能編造）",
+      "answer_len": 819,
+      "seconds": 21.6
+    },
+    {
+      "id": "u12",
+      "kind": "absent",
+      "q": "鹽霧測試的箱體溫度要維持在幾度",
+      "score": 1.0,
+      "detail": "正確拒答",
+      "answer_len": 85,
+      "seconds": 21.7
+    },
+    {
+      "id": "u13",
+      "kind": "absent",
+      "q": "PCB 的厚度公差規定是多少 mm",
+      "score": 1.0,
+      "detail": "正確拒答",
+      "answer_len": 25,
+      "seconds": 14.2
+    }
+  ]
+}

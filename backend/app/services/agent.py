@@ -23,7 +23,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from . import agent_tools, ai
-from ..core.config import settings
+from ..core.config import citation_check_enabled, settings
 from .llm_provider import get_llm_provider
 from .system_config import SystemConfigService
 
@@ -935,6 +935,16 @@ def _grounded_synthesis(
     _ctx = [{"text": e.get("snippet") or e.get("text") or ""} for e in rag_evidence]
     ans = _flag_unsourced_values(_degrade_empty_tables(ans), _ctx)
     ans = _flag_unverified_premise(question, ans, _ctx)
+    # 引用事後校驗也在迴圈結束後做（同上理由）。sources 與提示詞裡的
+    # [來源N] 編號同序（_synthesize_grounded 在同一迴圈建立兩者），
+    # 所以 N 對應 sources[N-1]。只換標記編號，不動答案內容。
+    if ans and citation_check_enabled():
+        try:
+            from . import citation_check
+            ans, _cfx = citation_check.validate_citations(
+                ans, {i + 1: (s.get("snippet") or "") for i, s in enumerate(sources)})
+        except Exception as exc:  # noqa: BLE001 — 校驗失敗不可拖垮答案本身
+            logger.warning("引用校驗失敗，保留原答案: %s", exc)
     return ans, sources, n_used, n_total
 
 
@@ -1309,7 +1319,8 @@ def route_mode(question: str) -> str:
 
 
 def run_rag_only_events(db: Session, question: str,
-                        conversation_history: Optional[List[Dict[str, Any]]] = None):
+                        conversation_history: Optional[List[Dict[str, Any]]] = None,
+                        out_meta: Optional[Dict[str, Any]] = None):
     """混合路由的純 RAG 分支，以事件形式產出：
 
         ("sources", [...])          檢索一完成就先送（約 2.4 秒）
@@ -1318,12 +1329,22 @@ def run_rag_only_events(db: Session, question: str,
     為什麼要分兩段：AiHub 閘道整層不支援 streaming（v0.9 移除，實測五個模型
     都回同一個伺服器端錯誤），答案只能等整段回來。先把檢索結果推出去，
     使用者 2.4 秒就能讀原文，而不是盯著空白轉圈 20 秒。
+
+    out_meta 若有傳入，會被填入查詢改寫的結果（optimized_query / rewritten /
+    rewrite_source）。改寫是無條件的，使用者卻看不到系統實際拿去查的字串是
+    什麼 —— 純 RAG 那條路早就會顯示「AI 理解：xxx」，混合模式（預設模式）
+    反而沒有。註：db.info 的 remember_resolved 也帶同一份資訊，兩者並存是為了
+    讓不共用 session 的呼叫端（評測腳本）也能拿到。
     """
     # 查詢改寫（單一入口）。承接「鹽霧測試的箱體溫度」之後問「那濕度呢」，
     # 沒有改寫就會撈回濕度測試的內容。
     _resolved = resolve_query(question, conversation_history)
     remember_resolved(db, _resolved)
     question = _resolved["query"]
+    if out_meta is not None:
+        out_meta["optimized_query"] = _resolved.get("query")
+        out_meta["rewritten"] = bool(_resolved.get("rewritten"))
+        out_meta["rewrite_source"] = _resolved.get("source")
     seeded, _conf = _seed_evidence_via_rag(db, question, top_k=5)
 
     subject_caution = ""
@@ -1407,10 +1428,11 @@ def run_rag_only_events(db: Session, question: str,
 
 
 def run_rag_only(db: Session, question: str,
-                 conversation_history: Optional[List[Dict[str, Any]]] = None):
+                 conversation_history: Optional[List[Dict[str, Any]]] = None,
+                 out_meta: Optional[Dict[str, Any]] = None):
     """同 run_rag_only_events，但一次回 (answer, sources)。給不需要中途事件的呼叫端。"""
     out = ("查無足夠的相關內容，請提供更多文件或調整問題。", [])
-    for kind, payload in run_rag_only_events(db, question, conversation_history):
+    for kind, payload in run_rag_only_events(db, question, conversation_history, out_meta):
         if kind == "final":
             out = payload
     return out

@@ -27,6 +27,11 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
   const [addOptionField, setAddOptionField] = useState(null);
   const [addOptionForm] = Form.useForm();
   const [addingOption, setAddingOption] = useState(false);
+  // 分類的即時新增（分類不是 metadata 欄位，走 /admin/classifications）。
+  // 本表單所在頁面（建立/編輯文件）皆為 admin 專用，權限與端點一致。
+  const [addClsModalVisible, setAddClsModalVisible] = useState(false);
+  const [addClsForm] = Form.useForm();
+  const [addingCls, setAddingCls] = useState(false);
 
   // 強制 VL 視覺解析
   const [forceVision, setForceVision] = useState(false);
@@ -239,6 +244,14 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
         })
       );
 
+      // 專案選單讀的是獨立的 projectOptions state（歷史包袱），要一併同步，
+      // 否則新選項存進了後端、下拉裡卻看不到。
+      if (addOptionField.name === "project_id") {
+        setProjectOptions((prev) => [
+          ...prev, { label: newOption.display_value, value: newOption.value },
+        ]);
+      }
+
       // 自動選擇新增的選項
       const fieldPath = ["metadata", addOptionField.name];
       form.setFieldValue(fieldPath, newOption.value);
@@ -250,6 +263,27 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
       message.error(error.response?.data?.detail ?? "新增選項失敗");
     } finally {
       setAddingOption(false);
+    }
+  };
+
+  const handleAddClassification = async () => {
+    try {
+      const values = await addClsForm.validateFields();
+      setAddingCls(true);
+      const resp = await apiClient.post("admin/classifications", {
+        name: values.name,
+        code: values.code || null,
+      });
+      await fetchClassifications();
+      form.setFieldValue("classification_id", resp.data.id);
+      message.success(`已新增分類：${resp.data.name}`);
+      setAddClsModalVisible(false);
+      addClsForm.resetFields();
+    } catch (error) {
+      if (error?.errorFields) return;   // 表單驗證錯誤，Modal 內已顯示
+      message.error(error.response?.data?.detail ?? "新增分類失敗");
+    } finally {
+      setAddingCls(false);
     }
   };
 
@@ -725,6 +759,20 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
               value: option.id,
               label: option.code ? `${option.name} (${option.code})` : option.name,
             }))}
+            dropdownRender={(menu) => (
+              <>
+                {menu}
+                <Divider style={{ margin: "8px 0" }} />
+                <Button
+                  type="text"
+                  icon={<PlusOutlined />}
+                  style={{ width: "100%", textAlign: "left" }}
+                  onClick={() => { addClsForm.resetFields(); setAddClsModalVisible(true); }}
+                >
+                  新增分類
+                </Button>
+              </>
+            )}
           />
         </Form.Item>
 
@@ -732,7 +780,9 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
           <Input type="hidden" />
         </Form.Item>
 
-        {projectOptions.length > 0 && (
+        {/* 條件改為「欄位存在」而非「有選項」：欄位剛建立、還沒有任何選項時，
+            也要看得到選單才能用下面的「新增專案」。 */}
+        {metadataFields.some((f) => f.name === "project_id") && (
           <Form.Item name={["metadata", "project_id"]} label="所屬專案">
             <Select
               allowClear
@@ -740,6 +790,23 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
               placeholder="選擇專案"
               optionFilterProp="label"
               options={projectOptions}
+              dropdownRender={(menu) => (
+                <>
+                  {menu}
+                  <Divider style={{ margin: "8px 0" }} />
+                  <Button
+                    type="text"
+                    icon={<PlusOutlined />}
+                    style={{ width: "100%", textAlign: "left" }}
+                    onClick={() => {
+                      const pf = metadataFields.find((f) => f.name === "project_id");
+                      if (pf) handleOpenAddOption(pf);
+                    }}
+                  >
+                    新增專案
+                  </Button>
+                </>
+              )}
             />
           </Form.Item>
         )}
@@ -825,6 +892,39 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
             extra="顯示在介面上的名稱"
           >
             <Input placeholder="輸入顯示名稱" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 新增分類 Modal（分類不是 metadata 欄位，另走 /admin/classifications） */}
+      <Modal
+        title="新增分類"
+        open={addClsModalVisible}
+        onOk={handleAddClassification}
+        onCancel={() => {
+          setAddClsModalVisible(false);
+          addClsForm.resetFields();
+        }}
+        confirmLoading={addingCls}
+        okText="新增"
+        cancelText="取消"
+      >
+        <Form form={addClsForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="分類名稱"
+            rules={[{ required: true, message: "請輸入分類名稱" }]}
+            extra="例如：教育訓練文件、產品規格書"
+          >
+            <Input placeholder="輸入分類名稱" />
+          </Form.Item>
+          <Form.Item
+            name="code"
+            label="分類代碼（選填）"
+            rules={[{ pattern: /^[a-z0-9_-]*$/, message: "只能包含小寫英文、數字、底線和連字號" }]}
+            extra="例如：training、spec。留空則不設代碼"
+          >
+            <Input placeholder="輸入英文代碼" />
           </Form.Item>
         </Form>
       </Modal>

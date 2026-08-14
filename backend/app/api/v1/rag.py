@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from ... import models, schemas
-from ...core.config import settings
+from ...core.config import citation_check_enabled, settings
 from ...core.security import get_current_user
 from ...database import get_db
 from ...services import agent, ai, conversations, pdf_image, rerank, retrieval
@@ -21,6 +21,11 @@ from ...services.system_config import SystemConfigService
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _sse_data(payload: dict) -> str:
+    """本檔的串流用「無 event 名稱、只有 data」的 SSE 格式（前端依 data.type 分派）。"""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _hybrid_filtered(db, payload, search_query, embedding, vector_config, top_k,
@@ -234,6 +239,15 @@ def query_rag(
         system_prompt=rag_prompts["system_prompt"],
         user_template=rag_prompts["user_template"],
     )
+    # 引用事後校驗：contexts 的 source_num 就是提示詞裡的 [來源N] 編號，
+    # text 是模型實際看到的內容 —— 用它比對最準。只換標記，不動內容。
+    if citation_check_enabled():
+        try:
+            from ...services import citation_check
+            answer, _ = citation_check.validate_citations(
+                answer, {c["source_num"]: c["text"] for c in contexts})
+        except Exception as exc:
+            logger.warning("引用校驗失敗，保留原答案: %s", exc)
     return schemas.RAGQueryResponse(
         answer=answer,
         sources=sources,
@@ -367,13 +381,32 @@ def query_stream(
                         answer_parts.append(stream_chunk.get("text") or "")
                     yield f"data: {json.dumps(stream_chunk, ensure_ascii=False)}\n\n"
 
+            # 引用事後校驗。sources 已在生成「之前」送出（見上方），這裡只在
+            # 真的有修正時補送一個 corrected_answer 事件，前端用它替換畫面上
+            # 累積的文字 —— 使用者只會看到引用編號在結尾閃一下。
+            final_answer = "".join(answer_parts)
+            if citation_check_enabled():
+                try:
+                    from ...services import citation_check
+                    fixed, _cfx = citation_check.validate_citations(
+                        final_answer, {c["source_num"]: c["text"] for c in contexts})
+                    if _cfx:
+                        final_answer = fixed
+                        yield _sse_data({"type": "corrected_answer", "text": final_answer})
+                except Exception as exc:
+                    logger.warning("引用校驗失敗，保留原答案: %s", exc)
+
             # 串流是逐段送出的，段落級去重當下做不到（需要完整答案）。
             # 存檔前補跑一次，至少讓對話串裡留下的是乾淨版本。
             from ...services.ollama_client import dedupe_sections
             saved = conversations.append_message(
                 db, user_id, conversation_id,
-                question=question, answer=dedupe_sections("".join(answer_parts)),
+                question=question, answer=dedupe_sections(final_answer),
                 sources=sources_data, mode="rag",
+                optimized_query=(optimized_query
+                                 if optimized_query and optimized_query != question
+                                 else None),
+                is_followup=bool(payload.conversation_history),
             )
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': saved.id if saved else None}, ensure_ascii=False)}\n\n"
         except Exception as e:
@@ -567,9 +600,16 @@ def analyze_pdf_pages_stream(
 # ===== Per-user conversation history =====
 
 @router.get("/config")
-def get_rag_config(current_user=Depends(get_current_user)):
-    """回傳前端需要的 RAG 相關設定值"""
-    return {"max_pdf_analysis_pages": settings.MAX_PDF_ANALYSIS_PAGES}
+def get_rag_config(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """回傳前端需要的 RAG 相關設定值（含 UI 顯示旗標，全體使用者可讀）"""
+    show_kg = SystemConfigService(db).get_config("ui.show_knowledge_graph")
+    return {
+        "max_pdf_analysis_pages": settings.MAX_PDF_ANALYSIS_PAGES,
+        # 知識圖譜頁面的顯示開關（admin 可在管理介面切換）。
+        # 只影響側邊欄入口的顯示 —— KG 抽取照常於 ingest 後在背景執行，
+        # 資料持續累積在 kg_entities / kg_relations，重新開啟即可看到全部。
+        "show_knowledge_graph": True if show_kg is None else bool(show_kg),
+    }
 
 
 # ── 多對話串（V6）──────────────────────────────────────────
@@ -597,6 +637,31 @@ def create_conversation(
     title = (payload or {}).get("title")
     row = conversations.create(db, current_user.id, title=title)
     return conversations.to_summary(row)
+
+
+@router.post("/conversations/batch-delete")
+def batch_delete_conversations(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """批次刪除對話（側邊欄多選）。
+
+    用 POST 而非 DELETE：DELETE 帶 body 在部分 proxy/客戶端上不可靠。
+    逐一走 get_owned 的擁有者過濾 —— 清單裡混入別人的 id（或已被刪的）
+    一律靜默跳過，回傳實際刪除數。
+    """
+    ids = payload.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="缺少 ids")
+    deleted = 0
+    for cid in ids[:500]:                     # 安全上限，避免惡意超長清單
+        row = conversations.get_owned(db, current_user.id, str(cid))
+        if row:
+            db.delete(row)
+            deleted += 1
+    db.commit()
+    return {"deleted": deleted}
 
 
 @router.get("/conversations/{conversation_id}")

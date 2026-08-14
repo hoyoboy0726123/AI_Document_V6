@@ -602,23 +602,36 @@ Conversation history (most recent last):
 Current user question: {current_question}
 
 Instructions for the optimized query:
-- RULE 1: FIRST decide whether the CURRENT question already names its own subject
-  (a test name, a spec number, a topic, an abbreviation being asked about).
-  * If it DOES → return it essentially unchanged. Do NOT prepend the previous
-    subject. Adding an unrelated subject actively hurts retrieval.
-  * If it does NOT (it says "那個/這個/它", or is a bare parameter like
-    "那濕度呢" / "要跑多久") → the previous subject MUST appear as the first term.
-- RULE 2: Append the new intent keywords from the current question after the subject.
+- STEP 1 (decide first): Is the current question SELF-CONTAINED? It is self-contained when it
+  already names its own subject/topic and would be fully understandable with no history at all.
+  A DIFFERENT topic from the previous question is still self-contained — users change topics
+  mid-conversation all the time.
+  → If SELF-CONTAINED: return the current question UNCHANGED as the optimized query.
+    Do NOT prepend, append, or merge anything from the previous question. Never combine
+    two different topics into one query.
+- STEP 2 (only if NOT self-contained): the question is elliptical — it leans on the previous
+  question via pronouns (那/這/它/it/that), a bare parameter ("limit", "那濕度呢"), or would be
+  meaningless alone. Then the subject from the PREVIOUS question MUST appear as the first
+  term, followed by the new intent keywords. Never drop the inherited subject in this case.
 - RULE 3: Return ONE phrase (<= 12 words), no commas or lists, spaces allowed only.
 - RULE 4: Language must match the user's current question language. Never translate
   the whole query into another language.
 
 Examples:
+- Prev: "buying mode有幾種"  New: "料件有哪些種類"
+  → self-contained (own subject 料件; topic change is allowed)
+  Optimized: "料件有哪些種類"   ← UNCHANGED. "buying mode 料件種類" would be WRONG.
+- Prev: "鹽霧測試的箱體溫度要維持在幾度"  New: "冷凝測試方法與條件"
+  → self-contained (own subject 冷凝測試)
+  Optimized: "冷凝測試方法與條件"   ← UNCHANGED. Do not prepend 鹽霧測試.
 - Prev: "請問 Pressure test 有幾種測試?"  New: "我要知道測試力量"
+  → elliptical (no subject of its own)
   Optimized: "Pressure test 測試力量 數值"
 - Prev: "What are ESD test steps?"  New: "limit"
+  → elliptical
   Optimized: "ESD test limit values"
 - Prev: "shock test 測試標準"  New: "那關機測試標準呢"
+  → elliptical (那…呢 refers back)
   BAD:  "關機測試 標準"          ← dropped "shock test", WRONG
   GOOD: "shock test 關機條件 標準" ← kept subject, CORRECT
 - Prev: "vibration test procedure"  New: "pass criteria?"
@@ -848,15 +861,42 @@ def extract_text_with_vision(
         "| --- | --- | --- |\n"
         "| <cell> | <cell> | <cell> |\n"
         "```\n"
-        "   Preserve column count exactly. Empty cells use a space. NEVER flatten tables into prose.\n\n"
-        "3. LISTS — Use `-` for bullets and `1.` `2.` for numbered lists. Indent sub-items with 2 spaces.\n\n"
-        "4. IMAGES & DIAGRAMS — For every image, chart, diagram, flowchart, or figure on the page, insert a description block in this exact form:\n"
+        "   Preserve column count exactly. Empty cells use a space. NEVER flatten tables into prose.\n"
+        # 實測失效點：[Unit 0]基礎課程 的大類表被轉成 `| 01 CPU | CPU |` —— 模型把
+        # 「代碼」與「名稱」兩個視覺欄位併進第一格，再把名稱複製到第二格。原本的
+        # 「Preserve column count exactly」只約束欄「數」，沒約束欄「界」，所以擋不住。
+        "   Each visual column is its own cell: NEVER merge two columns into one cell, and NEVER\n"
+        "   duplicate one cell's content into another column. If a row's first column is a code and\n"
+        "   the second is its name, they stay in separate cells.\n"
+        "   Transcribe rows top-to-bottom in visual order. Do NOT add, drop, merge, or reorder rows.\n\n"
+        # 這條是本次新增的核心防線。實測 qwen2.5vl 把 `09, 0A, 0B, 0C, 0K, 10` 這串
+        # 代碼「整理」成連號，POWER MODULE 因此從 0A 變成 10（而 10 其實是 RESISTOR），
+        # 0B/0C/0K 整列消失；同頁還把「僅秀出前200筆」寫成 100 筆、「料號」寫成「科號」。
+        # 視覺模型的天性是把不整齊的序列順手補齊，必須明文禁止。
+        "3. VERBATIM — Transcribe ONLY what is visibly printed. This overrides any instinct to tidy up:\n"
+        "   - NEVER correct, complete, normalize, renumber, or reorder anything.\n"
+        "   - Identifier sequences are NOT necessarily consecutive. `09, 0A, 0B, 0C, 0K, 10` is valid\n"
+        "     as printed — do NOT renumber it into `09, 10, 11, 12`.\n"
+        "   - Copy codes/IDs character by character. `0` (zero) and `O` (letter) are different; so are\n"
+        "     `1`/`I`/`l` and `5`/`S` and `8`/`B`. If a code looks like a typo, copy the typo.\n"
+        "   - Copy numbers exactly as printed. Never round, rescale, or change a digit.\n"
+        "   - If text is cut off or unreadable, transcribe only the readable part. NEVER invent a row,\n"
+        "     a list entry, or a table that is not visibly on the page.\n\n"
+        # 這份語料裡有大量「投影片夾帶軟體操作截圖」的頁面。模型會把截圖裡的下拉選單
+        # 誤當成文件表格並自行重組（實測第 7 頁：畫面上只有次分類下拉選單，輸出卻多了
+        # 一張 25 列的大類對照表）。
+        "4. SCREENSHOTS — If the page embeds a screenshot of an application (forms, dropdowns, grids),\n"
+        "   transcribe the text exactly as it appears inside that screenshot. Do NOT reconstruct,\n"
+        "   complete, or expand a partially visible list, and do NOT turn UI widgets into a\n"
+        "   reference table that is not on the page.\n\n"
+        "5. LISTS — Use `-` for bullets and `1.` `2.` for numbered lists. Indent sub-items with 2 spaces.\n\n"
+        "6. IMAGES & DIAGRAMS — For every image, chart, diagram, flowchart, or figure on the page, insert a description block in this exact form:\n"
         "   `[IMAGE: <one-paragraph description: what it shows, key elements, labels, arrows, embedded text>]`\n"
         "   Place the [IMAGE: ...] block where the figure appears in reading order.\n"
         "   NEVER skip an image. Even a small logo or icon gets a brief [IMAGE: ...] line.\n\n"
-        "5. INLINE FORMATTING — Use `**bold**` for emphasized labels, backticks for codes/IDs (e.g. `MIL-STD-810G`).\n\n"
-        "6. INCLUDE EVERYTHING — All visible text: body, captions, labels, footnotes, headers, page numbers, footers. Preserve original language (do not translate Chinese to English or vice versa).\n\n"
-        "7. NO COMMENTARY — Do NOT preface with 'Here is the markdown' or wrap your output in code fences. Output the Markdown content directly."
+        "7. INLINE FORMATTING — Use `**bold**` for emphasized labels, backticks for codes/IDs (e.g. `MIL-STD-810G`).\n\n"
+        "8. INCLUDE EVERYTHING — All visible text: body, captions, labels, footnotes, headers, page numbers, footers. Preserve original language (do not translate Chinese to English or vice versa).\n\n"
+        "9. NO COMMENTARY — Do NOT preface with 'Here is the markdown' or wrap your output in code fences. Output the Markdown content directly."
     )
 
     for img_bytes, page_num in zip(image_bytes_list, page_numbers):

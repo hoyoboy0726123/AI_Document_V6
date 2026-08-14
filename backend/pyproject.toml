@@ -40,6 +40,14 @@ dependencies = [
   # scikit-learn / scipy / sentencepiece / tiktoken / einops 等)，否則 build pipeline
   # 會丟 DependencyError。
   "paddlex[ocr]==3.4.3",
+  # 預設 OCR 引擎（OCR_ENGINE=rapid）的 onnx 三件套。原本漏宣告，導致 rapid 路徑
+  # 在 services/rapid_ocr.py import 失敗後，被 ocr_pipeline 的 except 靜默退回
+  # pp_structure —— 也就是上面註解裡標明「Windows CPU 會 segfault」的保底路徑。
+  # onnxruntime 雖由 rapid-table 帶入，但 scripts/cuda_diag.py 直接 import，明確宣告。
+  "rapidocr",
+  "rapid-layout",
+  "rapid-table",
+  "onnxruntime",
   # Gemini 雲端 provider 用「現行」官方 SDK；舊的 google-generativeai 已棄用。
   "google-genai",
   # RAG rerank（撈寬再精選）：cross-encoder 重排，在 CPU 跑、不與 Ollama 搶 GPU。

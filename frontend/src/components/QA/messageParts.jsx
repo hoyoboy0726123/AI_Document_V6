@@ -1,5 +1,5 @@
-import { Button, Collapse, Divider, List, Space, Tag, Timeline, Typography } from "antd";
-import { BulbOutlined, EyeOutlined, RobotOutlined, ToolOutlined } from "@ant-design/icons";
+import { Button, Collapse, List, Space, Tag, Timeline, Typography } from "antd";
+import { BulbOutlined, EyeOutlined, FileTextOutlined, RobotOutlined, ToolOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -158,13 +158,17 @@ export const renderAgentSteps = (steps, isLive) => {
   );
 };
 
-export const renderSources = (sources, msgIndex, expandedSnippets, onToggle, onPreview) => {
+export const renderSources = (sources, msgIndex, expandedSnippets, onToggle, onPreview,
+                              defaultOpen = false) => {
   if (!sources || sources.length === 0) return null;
-  return (
-    <div style={{ marginTop: 16 }}>
-      <Divider orientation="left" style={{ fontSize: 13, marginTop: 16, marginBottom: 12 }}>
-        參考來源({sources.length})
-      </Divider>
+  // 預設收折：來源片段是原始語料（常含 markdown 表格與大量管線符號），
+  // 攤開後往往比答案本身還長，把畫面推得很雜。要查證來源的人會主動點開。
+  //
+  // 例外是「生成中」：雲端模型不支援 streaming，答案要等 20 秒才整段出現，
+  // 這段空窗期把先行來源展開讓使用者有原文可讀；答案一到就收回去
+  // （defaultOpen 由呼叫端依 sourcesPreliminary 決定）。
+  const list = (
+    <div>
       <List
         size="small"
         dataSource={sources}
@@ -218,5 +222,27 @@ export const renderSources = (sources, msgIndex, expandedSnippets, onToggle, onP
         }}
       />
     </div>
+  );
+
+  return (
+    <Collapse
+      size="small"
+      ghost
+      style={{ marginTop: 12 }}
+      // activeKey 不用受控值：受控會讓使用者手動收合後又被 re-render 打開。
+      // 用 key 讓 defaultActiveKey 在「生成中 → 已完成」時重新掛載一次即可。
+      key={defaultOpen ? "open" : "closed"}
+      defaultActiveKey={defaultOpen ? ["sources"] : []}
+      items={[{
+        key: "sources",
+        label: (
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            <FileTextOutlined style={{ marginRight: 4 }} />
+            參考來源（{sources.length}）
+          </Text>
+        ),
+        children: list,
+      }]}
+    />
   );
 };

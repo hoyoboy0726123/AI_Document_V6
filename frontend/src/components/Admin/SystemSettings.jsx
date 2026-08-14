@@ -17,6 +17,7 @@ import {
   Tag,
   Divider,
   Space,
+  Typography,
 } from "antd";
 import {
   DatabaseOutlined,
@@ -31,8 +32,11 @@ import {
   ToolOutlined,
   EyeOutlined,
   FileSearchOutlined,
+  NodeIndexOutlined,
 } from "@ant-design/icons";
 import apiClient from "../../services/api";
+
+const { Text } = Typography;
 
 // 預設模型清單(可自由打字覆寫,只是當下拉提示用)
 const PRESET_LLM_OLLAMA = [
@@ -99,6 +103,8 @@ const SystemSettings = () => {
   const [testingLlm, setTestingLlm] = useState(false);
 
   const [ocrForm] = Form.useForm();
+  const [concurrencyForm] = Form.useForm();
+  const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [savingOcr, setSavingOcr] = useState(false);
 
   // 載入系統配置
@@ -217,6 +223,96 @@ const SystemSettings = () => {
     }
   };
 
+  const [resettingInference, setResettingInference] = useState(false);
+
+  const handleResetInference = () => {
+    Modal.confirm({
+      title: "重置推論引擎？",
+      content: (
+        <div>
+          <p>將卸載 Ollama 上所有已載入的模型，下一次查詢會重新載入（約多等 15~30 秒）。</p>
+          <p>適用時機：<strong>答案品質突然變樣</strong>（例如原本完整的表格塌成單張列表）。
+            這是小顯存機器上模型重載偶發落入壞狀態的已知現象，乾淨重載即可恢復。</p>
+          <p>請先確認目前沒有進行中的查詢。</p>
+        </div>
+      ),
+      okText: "重置",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        setResettingInference(true);
+        try {
+          const resp = await apiClient.post("admin/reset-inference");
+          const names = (resp.data.unloaded || []).join("、") || "（沒有已載入的模型）";
+          if (resp.data.ok) {
+            message.success(`已卸載：${names}。下一次查詢將乾淨重載。`);
+          } else {
+            message.warning(`部分卸載失敗：${(resp.data.failed || []).join("、")}`);
+          }
+        } catch (error) {
+          message.error(error.response?.data?.detail ?? "重置失敗");
+        } finally {
+          setResettingInference(false);
+        }
+      },
+    });
+  };
+
+  const [showKg, setShowKg] = useState(true);
+  const [savingUiConfig, setSavingUiConfig] = useState(false);
+
+  const fetchUiConfig = async () => {
+    try {
+      const resp = await apiClient.get("admin/ui-config");
+      setShowKg(resp.data.show_knowledge_graph !== false);
+    } catch (e) {
+      // silent
+    }
+  };
+
+  const handleToggleKg = async (checked) => {
+    setSavingUiConfig(true);
+    try {
+      await apiClient.put("admin/ui-config", { show_knowledge_graph: checked });
+      setShowKg(checked);
+      message.success(checked
+        ? "已顯示知識圖譜。側邊欄入口將在下次載入頁面時出現。"
+        : "已隱藏知識圖譜入口。KG 抽取仍在背景執行、資料持續累積，隨時可再打開。");
+    } catch (error) {
+      message.error(error.response?.data?.detail ?? "儲存失敗");
+    } finally {
+      setSavingUiConfig(false);
+    }
+  };
+
+  const fetchLlmConcurrency = async () => {
+    try {
+      const resp = await apiClient.get("admin/llm-concurrency");
+      concurrencyForm.setFieldsValue({ max_concurrency: resp.data.max_concurrency ?? 1 });
+    } catch (e) {
+      // silent — admin-only or backend unreachable
+    }
+  };
+
+  const handleSaveLlmConcurrency = async (values) => {
+    setSavingConcurrency(true);
+    try {
+      await apiClient.put("admin/llm-concurrency", {
+        max_concurrency: values.max_concurrency,
+      });
+      message.success(
+        values.max_concurrency === 1
+          ? "已設為序列化：同時只允許一個 LLM 請求，後來者排隊"
+          : `已允許 ${values.max_concurrency} 個 LLM 請求同時進行`
+      );
+      await fetchLlmConcurrency();
+    } catch (error) {
+      message.error(error.response?.data?.detail ?? "儲存失敗");
+    } finally {
+      setSavingConcurrency(false);
+    }
+  };
+
   const handleSaveOcrConfig = async (values) => {
     setSavingOcr(true);
     try {
@@ -239,6 +335,8 @@ const SystemSettings = () => {
     fetchConfig();
     fetchLlmProviderConfig();
     fetchOcrConfig();
+    fetchLlmConcurrency();
+    fetchUiConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -853,6 +951,113 @@ const SystemSettings = () => {
       </Card>
 
       {/* 向量管理 */}
+      <Card
+        title={
+          <span>
+            <ThunderboltOutlined style={{ marginRight: 8 }} />
+            LLM 併發控制（立即生效）
+          </span>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Alert
+          message="小顯存機器請保持「1（序列化）」"
+          description={
+            <div>
+              <p>
+                兩個生成請求同時進行時，Ollama 會改變模型的 GPU/CPU 層切分。浮點運算路徑一變，
+                第一個 token 的選擇就可能翻轉，整段答案隨之發散 ——
+                <strong>即使溫度與亂數種子都固定也一樣</strong>，因為輸入雖同、運算路徑已不同。
+              </p>
+              <p>
+                <strong>實測後果不是「偶爾答錯」，而是「掉進另一個穩定點並持續」：</strong>
+                同一個問題原本回 1,435 字含 3 張表格，被並行干擾後變成 855 字、0 張表格，
+                之後每次都一樣，看起來像系統本來就是那樣。必須重啟服務並卸載模型才會恢復。
+              </p>
+              <p>
+                序列化的代價是併發時要排隊，但小顯存機器本來就沒有真正的併發能力 ——
+                兩個請求並行只會一起變慢又互相污染。<strong>換用能讓模型完全常駐 GPU
+                （不溢位到 CPU）的顯卡之後，才建議調高。</strong>
+              </p>
+            </div>
+          }
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+
+        <Form
+          form={concurrencyForm}
+          layout="vertical"
+          onFinish={handleSaveLlmConcurrency}
+          initialValues={{ max_concurrency: 1 }}
+        >
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item
+                label="同時允許的 LLM 請求數"
+                name="max_concurrency"
+                rules={[{ required: true, message: '請輸入 1 到 8 的整數' }]}
+                extra="1 = 完全序列化（建議）。超過的請求會排隊等待，不會失敗。"
+              >
+                <InputNumber min={1} max={8} step={1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Space>
+            <Button
+              type="primary"
+              htmlType="submit"
+              icon={<SaveOutlined />}
+              loading={savingConcurrency}
+            >
+              儲存
+            </Button>
+            <Button
+              danger
+              icon={<WarningOutlined />}
+              loading={resettingInference}
+              onClick={handleResetInference}
+            >
+              重置推論引擎
+            </Button>
+          </Space>
+          <div style={{ marginTop: 8 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              答案品質突然變樣（完整表格塌成清單）時按「重置推論引擎」：卸載所有模型強制乾淨重載，
+              下一次查詢約多等 15~30 秒。
+            </Text>
+          </div>
+        </Form>
+      </Card>
+
+      <Card
+        title={
+          <span>
+            <NodeIndexOutlined style={{ marginRight: 8 }} />
+            介面顯示
+          </span>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Space align="center">
+          <Switch
+            checked={showKg}
+            loading={savingUiConfig}
+            onChange={handleToggleKg}
+          />
+          <Text>側邊欄顯示「知識圖譜」頁面</Text>
+        </Space>
+        <div style={{ marginTop: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            知識圖譜針對規範類文件（ISO / IEC / MIL-STD / IEEE…）自動抽取引用與取代關係；
+            一般商管或教育訓練文件抽不出內容，圖譜會是空的。隱藏只收起入口 ——
+            <strong>抽取仍在每次文件匯入後自動執行、資料持續累積</strong>，
+            日後匯入規範文件再打開，全部看得到。
+          </Text>
+        </div>
+      </Card>
+
       <Card title="向量管理">
         <Alert
           message="刪除所有向量值說明"

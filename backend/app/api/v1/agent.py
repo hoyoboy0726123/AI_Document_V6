@@ -134,6 +134,7 @@ def agent_route(
             )
             yield _sse("route", {"mode": mode})
             final_text, final_sources = "", []
+            meta: Dict[str, Any] = {}    # rag 分支填入改寫結果；agent 分支保持空
             if mode == "agent":
                 for evt in agent.run_agent(db, question, conversation_history=history, max_steps=max_steps):
                     etype = evt.get("type")
@@ -146,20 +147,31 @@ def agent_route(
                     else:
                         yield _sse(etype or "info", evt)
             else:
-                # 檢索完成就先送 sources（約 2.4 秒），答案再等雲端 LLM。
-                # AiHub 整層不支援 streaming，不先推來源的話使用者要盯著空白轉圈 20 秒。
+                # 兩件事同時做：
+                #  1. 檢索完成就先送 sources（約 2.4 秒）—— AiHub 整層不支援
+                #     streaming，不先推來源使用者要盯著空白轉圈 20 秒
+                #  2. meta 收下查詢改寫結果，交給前端顯示「AI 理解：xxx」
+                #     並隨 append_message 持久化
                 for _kind, _payload in agent.run_rag_only_events(
-                        db, question, conversation_history=history):
+                        db, question, conversation_history=history, out_meta=meta):
                     if _kind == "sources":
                         yield _sse("sources", {"sources": _payload})
                     elif _kind == "final":
                         final_text, final_sources = _payload
-                        yield _sse("final", {"text": final_text, "sources": final_sources})
+                        yield _sse("final", {
+                            "text": final_text,
+                            "sources": final_sources,
+                            "optimized_query": meta.get("optimized_query"),
+                            "rewritten": meta.get("rewritten", False),
+                        })
 
             saved = conversations.append_message(
                 db, user_id, conversation_id,
                 question=question, answer=final_text,
                 sources=final_sources, mode=f"hybrid:{mode}",
+                optimized_query=(meta.get("optimized_query")
+                                 if mode == "rag" and meta.get("rewritten") else None),
+                is_followup=bool(history),
             )
             _rs = agent.get_resolved(db)
             yield _sse("done", {"ok": True, "mode": mode,

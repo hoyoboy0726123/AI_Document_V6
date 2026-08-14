@@ -1,13 +1,89 @@
+import contextlib
 import logging
 import json
 import re
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
 
-from ..core.config import settings
+from ..core.config import embedding_on_cpu, settings
 
 logger = logging.getLogger(__name__)
+
+
+# ── LLM 請求閘門 ────────────────────────────────────────────────────────
+#
+# 小顯存機器上兩個生成請求重疊時，Ollama 會改變模型的 GPU/CPU 層切分，
+# 浮點路徑一變、第一個 token 的選擇就可能翻轉，整段輸出隨之發散 ——
+# 而且會「掉進另一個穩定點並持續」，看起來像系統本來就是那樣
+# （實測：同一題 1435 字含 3 張表 → 855 字 0 張表，重啟才復原）。
+# 詳見 settings.OLLAMA_MAX_CONCURRENCY 的說明。
+#
+# 只擋 LLM（generate / chat 及其串流版），不擋 embed —— 嵌入釘在 CPU、
+# 暖機後約 340ms，不與生成搶 VRAM，沒理由讓它排在 28 秒的生成後面。
+_SLOT_LOCK = threading.Lock()
+_slot_sem: Optional[threading.BoundedSemaphore] = None
+_slot_limit = 0
+
+
+def _llm_concurrency() -> int:
+    try:
+        return max(1, int(getattr(settings, "OLLAMA_MAX_CONCURRENCY", 1) or 1))
+    except Exception:
+        return 1
+
+
+@contextlib.contextmanager
+def _llm_slot():
+    """取得一個 LLM 執行名額；名額用完就排隊等待。
+
+    限制值可在管理介面即時調整，這裡偵測到變動就重建信號量。重建的瞬間
+    可能短暫超出新上限（舊信號量上已持有的名額不受影響），但這只在管理員
+    改設定的那一次發生，不值得為它加更重的同步。
+    """
+    global _slot_sem, _slot_limit
+    limit = _llm_concurrency()
+    with _SLOT_LOCK:
+        if _slot_sem is None or _slot_limit != limit:
+            _slot_sem = threading.BoundedSemaphore(limit)
+            _slot_limit = limit
+            logger.info("LLM 併發上限設為 %d", limit)
+        sem = _slot_sem
+
+    # 等待上限刻意設短。
+    #
+    # 原本用 OLLAMA_TIMEOUT × 3（實務上 900 秒），實測會造成使用者無法理解的
+    # 長時間卡死：VL 多頁分析是「單一請求送出全部圖片」，Ollama 光 prefill 就要
+    # 好幾分鐘且期間毫無輸出 —— 後端卡在讀取回應上，沒有寫入動作，也就無從發現
+    # 使用者已經關掉分析視窗（前端有正確 abort，但斷線要等下一次寫入才會被發現）。
+    # 於是那把名額被一個「其實沒人在等結果」的請求佔著，後面的查詢全部排隊。
+    #
+    # 縮短到 90 秒：正常查詢排在另一個查詢後面約 20~30 秒就輪到，90 秒足夠；
+    # 真的等超過就放行 —— 此時多一個請求造成的干擾，遠好過讓使用者面對一個
+    # 看不出原因、也沒有進度的長時間停頓。
+    _WAIT_LIMIT_SEC = 90
+    t0 = time.perf_counter()
+    if not sem.acquire(blocking=False):
+        logger.info("LLM 名額已滿（上限 %d），開始排隊…", limit)
+        acquired = sem.acquire(timeout=_WAIT_LIMIT_SEC)
+    else:
+        acquired = True
+    if not acquired:
+        logger.warning("等待 LLM 名額逾時（%d 秒），放行以免請求卡死；"
+                       "前一個請求可能是 VL 多頁分析（prefill 期間無法偵測斷線）",
+                       _WAIT_LIMIT_SEC)
+        yield
+        return
+    waited = (time.perf_counter() - t0) * 1000
+    if waited > 500:
+        logger.info("LLM 請求排隊 %.0f ms（併發上限 %d）", waited, limit)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError):   # 信號量已被換掉時 release 會拋 ValueError
+            sem.release()
 
 
 def _strip_reasoning_blocks(text: str) -> str:
@@ -490,7 +566,8 @@ class OllamaClient:
         except Exception:
             pass
 
-        data = self._post("/api/generate", payload)
+        with _llm_slot():
+            data = self._post("/api/generate", payload)
         raw = data.get("response", "")
         # Only post-process when the caller didn't request a structured format
         if format:
@@ -565,7 +642,8 @@ class OllamaClient:
         elif default_opts:
             payload["options"] = default_opts
 
-        with self._client.stream("POST", "/api/generate", json=payload) as resp:
+        # 名額必須涵蓋「整個串流期間」，不能只擋建立連線那一刻
+        with _llm_slot(), self._client.stream("POST", "/api/generate", json=payload) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
                 if not line:
@@ -634,7 +712,8 @@ class OllamaClient:
         except Exception:
             pass
 
-        data = self._post("/api/chat", payload)
+        with _llm_slot():
+            data = self._post("/api/chat", payload)
         message = data.get("message") or {}
         content = message.get("content", "")
         raw_content = content
@@ -711,7 +790,8 @@ class OllamaClient:
                 retry_payload["options"] = default_opts
 
             logger.info("Ollama.chat auto-retry triggered (content empty or reasoning-only)")
-            retry_data = self._post("/api/chat", retry_payload)
+            with _llm_slot():
+                retry_data = self._post("/api/chat", retry_payload)
             rmsg = retry_data.get("message") or {}
             rcontent = rmsg.get("content", "")
             final_retry = _strip_control_tokens(_squelch_repetition(_extract_final_answer(rcontent)))
@@ -825,7 +905,8 @@ class OllamaClient:
         elif default_opts:
             payload["options"] = default_opts
 
-        with self._client.stream("POST", "/api/chat", json=payload) as resp:
+        # 名額必須涵蓋「整個串流期間」，不能只擋建立連線那一刻
+        with _llm_slot(), self._client.stream("POST", "/api/chat", json=payload) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
                 logger.debug("Ollama stream received line: %s", line)
@@ -890,6 +971,13 @@ class OllamaClient:
                 payload["options"] = {"num_ctx": settings.OLLAMA_EMBED_NUM_CTX}
         except Exception:
             pass
+
+        # /api/embed 原本完全沒帶 options，於是嵌入模型一律搶 GPU、把生成模型
+        # 擠出顯卡（見 settings.EMBEDDING_DEVICE 的說明與實測數字）。
+        # 這裡不共用 _default_options()：那裡的 num_ctx / temperature / seed
+        # 對嵌入沒有意義。
+        if embedding_on_cpu():
+            payload["options"] = {"num_gpu": 0}
 
         data = self._post("/api/embed", payload)
         embeddings = data.get("embeddings")

@@ -773,6 +773,134 @@ def update_ocr_config(
     return {"ok": True}
 
 
+@router.get("/llm-concurrency")
+@router.get("/llm-concurrency/")
+def get_llm_concurrency(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """讀取「同時允許幾個 LLM 請求」。"""
+    _ = current_admin
+    stored = SystemConfigService(db).get_config("llm.max_concurrency")
+    try:
+        value = int(stored) if stored is not None else int(settings.OLLAMA_MAX_CONCURRENCY)
+    except (TypeError, ValueError):
+        value = int(settings.OLLAMA_MAX_CONCURRENCY)
+    return {
+        "max_concurrency": max(1, value),
+        "min": 1,
+        "max": 8,
+        "note": ("1 = 完全序列化（小顯存機器建議值）。並行請求會讓 Ollama 改變模型的 "
+                 "GPU/CPU 層切分，導致同一個問題的答案品質改變且持續不恢復。"
+                 "換用能讓模型完全常駐 GPU 的顯卡後才建議調高。"),
+    }
+
+
+@router.put("/llm-concurrency")
+@router.put("/llm-concurrency/")
+def update_llm_concurrency(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """更新 LLM 併發上限；立即生效（ollama_client 偵測到變動會重建信號量）。"""
+    _ = current_admin
+    try:
+        value = int(payload.get("max_concurrency"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="max_concurrency 必須是整數")
+    if not 1 <= value <= 8:
+        raise HTTPException(status_code=400, detail="max_concurrency 需介於 1 到 8")
+
+    SystemConfigService(db).set_config(
+        "llm.max_concurrency", value, "同時允許幾個 LLM 請求（1 = 序列化）")
+    try:
+        settings.OLLAMA_MAX_CONCURRENCY = value
+    except Exception as exc:
+        logger.warning("寫入 in-memory settings 失敗: %s", exc)
+    logger.info("LLM 併發上限已改為 %d", value)
+    return {"ok": True, "max_concurrency": value}
+
+
+@router.get("/ui-config")
+@router.get("/ui-config/")
+def get_ui_config(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """UI 顯示旗標（目前只有知識圖譜頁面開關）。"""
+    _ = current_admin
+    show_kg = SystemConfigService(db).get_config("ui.show_knowledge_graph")
+    return {"show_knowledge_graph": True if show_kg is None else bool(show_kg)}
+
+
+@router.put("/ui-config")
+@router.put("/ui-config/")
+def update_ui_config(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """切換 UI 顯示旗標。
+
+    「隱藏知識圖譜」只收起側邊欄入口，供內容用不到 KG 的單位保持介面乾淨。
+    抽取行為完全不受影響（KG_AUTO_EXTRACT 照常於 ingest 後在背景執行），
+    資料持續累積 —— 日後匯入含規範代號的文件後重新打開，全部看得到。
+    """
+    _ = current_admin
+    if "show_knowledge_graph" not in payload:
+        raise HTTPException(status_code=400, detail="缺少 show_knowledge_graph")
+    value = bool(payload["show_knowledge_graph"])
+    SystemConfigService(db).set_config(
+        "ui.show_knowledge_graph", value, "側邊欄是否顯示知識圖譜頁面")
+    logger.info("知識圖譜頁面顯示 = %s", value)
+    return {"ok": True, "show_knowledge_graph": value}
+
+
+@router.post("/reset-inference")
+@router.post("/reset-inference/")
+def reset_inference_engine(
+    current_admin=Depends(get_current_admin_user),
+):
+    """卸載 Ollama 上所有已載入的模型，強制下一次請求乾淨重載。
+
+    為什麼需要：qwen3:8b @ num_ctx=8192 佔 6.2GB，貼著本機可用 VRAM 的邊緣。
+    模型每次重載（VL 換模、KEEP_ALIVE 到期、服務重啟）都可能落在不同的
+    GPU/CPU 層配置上 —— 偶爾落進一個「答案塌成單張列表」的壞穩定點，且
+    `ollama ps` 兩種狀態都顯示 100% GPU，無法從外部偵測。實測乾淨卸載後
+    重載即恢復（答案回到與基準逐位元組相同）。詳見 DEPLOY_NOTES。
+
+    卸載方式：對每個已載入模型送 keep_alive=0 的空請求（Ollama 官方的
+    卸載慣例，等同 CLI 的 `ollama stop`）。生成型模型走 /api/generate，
+    嵌入型模型 generate 會失敗，退而走 /api/embed。
+    """
+    _ = current_admin
+    import httpx as _httpx
+
+    unloaded: list = []
+    failed: list = []
+    try:
+        with _httpx.Client(base_url=settings.OLLAMA_BASE_URL, timeout=60) as c:
+            loaded = (c.get("/api/ps").json() or {}).get("models") or []
+            for m in loaded:
+                name = m.get("name") or m.get("model") or ""
+                if not name:
+                    continue
+                try:
+                    r = c.post("/api/generate", json={"model": name, "keep_alive": 0})
+                    if r.status_code != 200:
+                        r = c.post("/api/embed",
+                                   json={"model": name, "input": "x", "keep_alive": 0})
+                    (unloaded if r.status_code == 200 else failed).append(name)
+                except Exception:
+                    failed.append(name)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"連不上 Ollama：{exc}")
+
+    logger.info("重置推論引擎：卸載 %s，失敗 %s", unloaded, failed or "無")
+    return {"ok": not failed, "unloaded": unloaded, "failed": failed}
+
+
 @router.put("/vector-config")
 @router.put("/vector-config/")
 def update_vector_config(

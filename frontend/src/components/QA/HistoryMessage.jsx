@@ -35,7 +35,10 @@ const HistoryMessage = memo(function HistoryMessage({
           </Tag>
         )}
         <Text strong style={{ fontSize: 16, marginLeft: 8 }}>{msg.question}</Text>
-        {msg.optimized_query && msg.optimized_query !== msg.question && (
+        {/* 「最終用什麼去查」要永遠看得到答案，不能只在有改寫時出現：
+            有改寫 → 顯示改寫後的查詢；追問但未改寫 → 明示以原句檢索。
+            （這些欄位已隨對話持久化，切換對話再回來不會消失。） */}
+        {msg.optimized_query && msg.optimized_query !== msg.question ? (
           <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #1890ff" }}>
             <Text type="secondary" style={{ fontSize: 13 }}>AI 理解：{msg.optimized_query}</Text>
             {/* 改寫是在送出後才知道結果的（LLM 要 1-8 秒，沒辦法邊打字邊預覽），
@@ -52,7 +55,11 @@ const HistoryMessage = memo(function HistoryMessage({
               </Button>
             )}
           </div>
-        )}
+        ) : (msg.is_followup ? (
+          <div style={{ marginTop: 8, paddingLeft: 12, borderLeft: "3px solid #d9d9d9" }}>
+            <Text type="secondary" style={{ fontSize: 13 }}>以原句檢索（未改寫）</Text>
+          </div>
+        ) : null)}
       </div>
       <Card
         size="small"

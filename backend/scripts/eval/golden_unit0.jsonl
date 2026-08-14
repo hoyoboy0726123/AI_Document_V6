@@ -1,0 +1,14 @@
+{"id": "u01", "kind": "coverage", "q": "料件有哪些種類", "gold": ["CPU", "CHIPSET", "MEMORY", "PCB", "INDUCTOR", "RESISTOR", "CAPACITOR", "CONNECTOR", "MECHANICAL", "CABLE", "PACKING", "SUBMATERIAL", "DISPLAY", "STORAGE", "POWER MODULE", "BATTERY", "COMMUNICATION", "I/O MODULE", "SOFTWARE", "FIRMWARE", "LASER MARKING", "MARKETING"], "note": "第11頁類別代號表共 30 列；取其中 22 個名稱當涵蓋度指標"}
+{"id": "u02", "kind": "exact", "q": "大類代碼 10 代表哪一種料件", "gold": ["RESISTOR"], "forbidden": ["POWER MODULE"], "note": "第11頁：10=RESISTOR。VL 曾把它轉寫成 10=POWER MODULE，forbidden 用來抓這個錯"}
+{"id": "u03", "kind": "exact", "q": "類別代號 0A 代表什麼", "gold": ["POWER MODULE"], "forbidden": ["RESISTOR"], "note": "第11頁：0A=POWER MODULE (ADAPTER/POWER)"}
+{"id": "u04", "kind": "exact", "q": "BATTERY 的類別代號是什麼", "gold": ["0B"], "note": "第11頁：0B=BATTERY。注意是數字零不是字母 O"}
+{"id": "u05", "kind": "exact", "q": "I/O MODULE 的類別代號是什麼", "gold": ["0K"], "note": "第11頁：0K=I/O MODULE (K/B/MOUSE)。三個版本中只有新 VL 提示詞讀對成數字零"}
+{"id": "u06", "kind": "exact", "q": "新版原物料料號總共幾碼", "gold": ["14"], "note": "第7頁：新原物料編碼原則『兩碼大類+三碼次分類+-』，共14碼含-"}
+{"id": "u07", "kind": "coverage", "q": "新舊原物料編碼原則有什麼差異", "gold": ["12", "14", "G"], "note": "第7頁：舊 12 碼含 G、新 14 碼含 -"}
+{"id": "u08", "kind": "coverage", "q": "料號的 AA、BBB、CC 各代表什麼", "gold": ["大類", "次分類", "流水碼"], "note": "第7頁說明：AA=原物料大類 BBB=原物料次分類 CC...=流水碼"}
+{"id": "u09", "kind": "coverage", "q": "原物料介紹裡 EE、ME、Key parts、Key module 分別指什麼", "gold": ["電子零件", "機構件", "關鍵零組件", "關鍵模組"], "note": "原物料介紹九宮格的前四格。第一版問「原物料依功能分成哪幾類」有歧義 —— 系統答『大類』分類（CPU/CHIPSET…）其實也算一種分類，得 1/8 是題目的錯不是系統的錯"}
+{"id": "u10", "kind": "coverage", "q": "筆記型電腦拆解後有哪些主要組件", "gold": ["LCD", "Key board", "Touch pad", "ODD", "HDD", "Speaker", "Thermal module", "Battery", "Memory"], "note": "NB拆解說明頁"}
+{"id": "u11", "kind": "absent", "q": "這份文件規定的產品保固年限是幾年", "note": "語料中『保固』『年限』出現 0 次 —— 正確行為是誠實說查不到"}
+{"id": "u12", "kind": "absent", "q": "鹽霧測試的箱體溫度要維持在幾度", "note": "屬 MIL-STD 領域，本語料中『鹽霧』『箱體溫度』出現 0 次"}
+{"id": "u13", "kind": "absent", "q": "PCB 的厚度公差規定是多少 mm", "note": "語料中『厚度公差』出現 0 次；PCB 只以大類名稱出現，無規格"}
+{"id": "u14", "kind": "citation", "q": "buying mode有幾種", "gold": ["Buy & Sell", "Assign", "Turnkey", "Consign"], "cite_anchor": "Consign", "note": "引用歸屬測試。內容在含 Consign/Turnkey 的切片（第13頁起、延伸到第14頁投影片）。實測修正前四個條目全標到類別代號表那個來源 → 引用正確率 0"}
