@@ -455,8 +455,15 @@ def get_system_config(
     ]
 
     current_embed_model = settings.OLLAMA_EMBED_MODEL
-    current_llm_model = settings.OLLAMA_LLM_MODEL
     current_vision_model = settings.OLLAMA_VISION_MODEL
+    # 文字模型要看實際生效的 provider：切到 AiHub 後仍顯示 OLLAMA_LLM_MODEL
+    # 會讓人以為沒切成功（實測畫面寫 gemma4:12b、實際跑的是 GPT-OSS）。
+    current_llm_provider = getattr(settings, "LLM_PROVIDER", "ollama") or "ollama"
+    if current_llm_provider == "aihub":
+        current_llm_model = (getattr(settings, "LLM_MODEL", None)
+                             or getattr(settings, "AIHUB_MODEL", "gpt-oss"))
+    else:
+        current_llm_model = settings.LLM_MODEL or settings.OLLAMA_LLM_MODEL
 
     # 統計信息
     total_documents = db.query(models.Document).count()
@@ -477,6 +484,7 @@ def get_system_config(
     return schemas.SystemConfigRead(
         embedding_model=current_embed_model,
         llm_model=current_llm_model,
+        llm_provider=current_llm_provider,
         vision_model=current_vision_model,
         available_models=available_models,
         ollama_version=ollama_client.version(),
@@ -544,18 +552,28 @@ def get_llm_provider(
     _ = current_admin
     config_service = SystemConfigService(db)
     overrides = config_service.get_llm_provider_config()
-    api_key = overrides.get("gemini.api_key") or settings.GEMINI_API_KEY or ""
+    llm_provider = overrides.get("llm.provider") or settings.LLM_PROVIDER or "ollama"
+    if llm_provider == "aihub":
+        llm_model = (overrides.get("llm.model") or settings.LLM_MODEL
+                     or getattr(settings, "AIHUB_MODEL", "gpt-oss"))
+    else:
+        llm_model = overrides.get("llm.model") or settings.LLM_MODEL or settings.OLLAMA_LLM_MODEL
+    # AiHub 金鑰只從 .env 讀，不開放 UI 輸入也不寫進 DB —— 它是企業憑證，
+    # 存進 system_configs 等於讓任何能讀 DB 的人拿到。這裡只回報有沒有設定。
+    aihub_key = getattr(settings, "AIHUB_API_KEY", None) or ""
     return {
-        "llm_provider": overrides.get("llm.provider") or settings.LLM_PROVIDER,
-        "llm_model": overrides.get("llm.model") or settings.LLM_MODEL or settings.OLLAMA_LLM_MODEL,
-        "embedding_provider": overrides.get("embedding.provider") or settings.EMBEDDING_PROVIDER,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        # embedding / vision 固定本地 Ollama：AiHub 沒有 embedding 端點，
+        # 也不吃影像輸入；換 embedding 還要重建全部向量，不該用切換鈕暴露。
+        "embedding_provider": "ollama",
         "embedding_model": overrides.get("embedding.model") or settings.EMBEDDING_MODEL or settings.OLLAMA_EMBED_MODEL,
-        "vision_provider": overrides.get("vision.provider") or settings.VISION_PROVIDER,
+        "vision_provider": "ollama",
         "vision_model": overrides.get("vision.model") or settings.OLLAMA_VISION_MODEL,
-        "gemini_api_key_set": bool(api_key),
-        "gemini_api_key_preview": (api_key[:4] + "..." + api_key[-4:]) if len(api_key) > 12 else "",
-        "gemini_llm_model_default": settings.GEMINI_LLM_MODEL,
-        "gemini_embed_model_default": settings.GEMINI_EMBED_MODEL,
+        "aihub_api_key_set": bool(aihub_key),
+        "aihub_api_key_preview": (aihub_key[:4] + "..." + aihub_key[-4:]) if len(aihub_key) > 12 else "",
+        "aihub_base_url": getattr(settings, "AIHUB_BASE_URL", ""),
+        "aihub_model_default": getattr(settings, "AIHUB_MODEL", "gpt-oss"),
     }
 
 
@@ -570,31 +588,30 @@ def update_llm_provider(
     _ = current_admin
     config_service = SystemConfigService(db)
 
-    # Validate provider names
-    valid_providers = {"ollama", "gemini"}
-    if "llm_provider" in payload and payload["llm_provider"] not in valid_providers:
-        raise HTTPException(status_code=400, detail=f"llm_provider must be one of {valid_providers}")
-    if "embedding_provider" in payload and payload["embedding_provider"] not in valid_providers:
-        raise HTTPException(status_code=400, detail=f"embedding_provider must be one of {valid_providers}")
-    # VL 目前只支援 ollama;預留 gemini 但前端會擋
-    if "vision_provider" in payload and payload["vision_provider"] not in {"ollama", "gemini"}:
-        raise HTTPException(status_code=400, detail="vision_provider must be one of ollama|gemini")
+    # 只有「文字模型」可切後端。embedding 換了要重建全部向量、AiHub 也沒有
+    # embedding 與影像端點，因此這兩者固定 ollama，不接受 payload 覆寫。
+    valid_llm_providers = {"ollama", "aihub"}
+    if "llm_provider" in payload and payload["llm_provider"] not in valid_llm_providers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"llm_provider must be one of {sorted(valid_llm_providers)}")
+    if payload.get("llm_provider") == "aihub" and not getattr(settings, "AIHUB_API_KEY", None):
+        raise HTTPException(
+            status_code=400,
+            detail="尚未設定 AIHUB_API_KEY —— 請在後端 .env 填入後重啟服務")
 
     db_payload = {}
     if "llm_provider" in payload:
         db_payload["llm.provider"] = payload["llm_provider"]
     if "llm_model" in payload:
         db_payload["llm.model"] = payload["llm_model"]
-    if "embedding_provider" in payload:
-        db_payload["embedding.provider"] = payload["embedding_provider"]
     if "embedding_model" in payload:
         db_payload["embedding.model"] = payload["embedding_model"]
-    if "vision_provider" in payload:
-        db_payload["vision.provider"] = payload["vision_provider"]
     if "vision_model" in payload:
         db_payload["vision.model"] = payload["vision_model"]
-    if "gemini_api_key" in payload:
-        db_payload["gemini.api_key"] = payload["gemini_api_key"]
+    # embedding / vision 的 provider 永遠寫回 ollama，清掉早期可能存下的 gemini
+    db_payload["embedding.provider"] = "ollama"
+    db_payload["vision.provider"] = "ollama"
 
     config_service.update_llm_provider_config(db_payload)
 
@@ -602,10 +619,7 @@ def update_llm_provider(
     attr_map = {
         "llm_provider": "LLM_PROVIDER",
         "llm_model": "LLM_MODEL",
-        "embedding_provider": "EMBEDDING_PROVIDER",
         "embedding_model": "EMBEDDING_MODEL",
-        "vision_provider": "VISION_PROVIDER",
-        "gemini_api_key": "GEMINI_API_KEY",
     }
     for k, attr in attr_map.items():
         if k in payload:
@@ -613,6 +627,11 @@ def update_llm_provider(
                 setattr(settings, attr, payload[k] or None)
             except Exception:
                 pass
+    for attr in ("EMBEDDING_PROVIDER", "VISION_PROVIDER"):
+        try:
+            setattr(settings, attr, "ollama")
+        except Exception:
+            pass
     # VL 模型同步改 OLLAMA_VISION_MODEL,讓 services/ai.py 直接吃到
     if "vision_model" in payload and payload["vision_model"]:
         try:

@@ -401,6 +401,9 @@ class SystemConfigRead(BaseModel):
     """系統配置讀取"""
     embedding_model: str
     llm_model: str
+    # 文字模型的後端（ollama / aihub）。原本狀態卡一律顯示 OLLAMA_LLM_MODEL，
+    # 切到雲端 provider 後畫面仍寫本地模型名，看起來像沒切成功。
+    llm_provider: Optional[str] = None
     vision_model: Optional[str] = None
     available_models: List[str]
     ollama_version: Optional[str] = None

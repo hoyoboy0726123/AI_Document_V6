@@ -3,7 +3,6 @@ import {
   Card,
   Button,
   AutoComplete,
-  Input,
   message,
   Radio,
   Statistic,
@@ -48,11 +47,15 @@ const PRESET_LLM_OLLAMA = [
   { label: "Mistral 7B", value: "mistral:7b" },
 ];
 
-const PRESET_LLM_GEMINI = [
-  { label: "Gemini 2.5 Flash  (快)", value: "gemini-2.5-flash" },
-  { label: "Gemini 2.5 Pro  (品質高)", value: "gemini-2.5-pro" },
-  { label: "Gemma 3 27B IT  (Google AI Studio)", value: "gemma-3-27b-it" },
-  { label: "Gemma 4 26B A4B  (MoE)", value: "gemma-4-26B-A4B-it" },
+// AiHub OpenAPI v0.9 提供的模型。值對應 provider 的 service/version 簡寫。
+const PRESET_LLM_AIHUB = [
+  { label: "GPT-OSS 120B  (自建, 適合機密資料)", value: "gpt-oss" },
+  { label: "GPT-4.1", value: "gpt41" },
+  { label: "GPT-4.1 mini  (較快)", value: "gpt41-mini" },
+  { label: "Claude 4.5", value: "claude45" },
+  { label: "Claude 3.7", value: "claude37" },
+  { label: "Gemini 2.5 Pro", value: "gemini2.5pro" },
+  { label: "Gemini 2.5 Flash  (較快)", value: "gemini2.5flash" },
 ];
 
 const PRESET_EMBED_OLLAMA = [
@@ -62,10 +65,6 @@ const PRESET_EMBED_OLLAMA = [
   { label: "Nomic Embed Text  (768 dim)", value: "nomic-embed-text" },
 ];
 
-const PRESET_EMBED_GEMINI = [
-  { label: "text-embedding-004  (768 dim, 預設)", value: "text-embedding-004" },
-  { label: "gemini-embedding-001  (3072 dim)", value: "gemini-embedding-001" },
-];
 
 const PRESET_VL_OLLAMA = [
   { label: "Gemma 4 E2B  (新, 128K ctx, 沒 GGML bug, 細節較弱)", value: "gemma4:e2b" },
@@ -143,7 +142,6 @@ const SystemSettings = () => {
         embedding_model: resp.data.embedding_model || "",
         vision_provider: resp.data.vision_provider || "ollama",
         vision_model: resp.data.vision_model || "",
-        gemini_api_key: "", // never echo back
       });
     } catch (e) {
       // silent — endpoint may be admin-only or backend unreachable
@@ -153,21 +151,15 @@ const SystemSettings = () => {
   const handleSaveLlmProvider = async (values) => {
     setSavingLlm(true);
     try {
+      // embedding / vision 固定本地 Ollama，後端會強制寫回，這裡不送 provider
       const payload = {
         llm_provider: values.llm_provider,
         llm_model: values.llm_model || null,
-        embedding_provider: values.embedding_provider,
         embedding_model: values.embedding_model || null,
-        vision_provider: values.vision_provider || "ollama",
         vision_model: values.vision_model || null,
       };
-      // Only send API key if user typed something — empty string clears
-      if (values.gemini_api_key && values.gemini_api_key.trim()) {
-        payload.gemini_api_key = values.gemini_api_key.trim();
-      }
       await apiClient.put("admin/llm-provider", payload);
       message.success("LLM 設定已儲存,下一次呼叫將使用新後端");
-      llmProviderForm.setFieldsValue({ gemini_api_key: "" });
       await fetchLlmProviderConfig();
     } catch (error) {
       message.error(error.response?.data?.detail ?? "儲存失敗");
@@ -374,7 +366,12 @@ const SystemSettings = () => {
           </Col>
           <Col span={6}>
             <Statistic
-              title="LLM 模型"
+              title={
+                <Space size={4}>
+                  LLM 模型
+                  {config?.llm_provider === "aihub" && <Tag color="blue">AiHub 雲端</Tag>}
+                </Space>
+              }
               value={config?.llm_model || "-"}
               prefix={<RobotOutlined />}
             />
@@ -426,7 +423,7 @@ const SystemSettings = () => {
           description={
             <div>
               <p><strong>Embedding 模型：</strong>用於文本向量化（需要在 .env 中修改 OLLAMA_EMBED_MODEL）</p>
-              <p><strong>LLM 模型：</strong>用於生成回答和分析（需要在 .env 中修改 OLLAMA_LLM_MODEL）</p>
+              <p><strong>LLM 模型：</strong>用於生成回答和分析（本地模型改 .env 的 OLLAMA_LLM_MODEL；雲端請在下方切換為 AiHub）</p>
               <p><strong>Vision 模型：</strong>用於處理 PDF 圖片辨識（需要在 .env 中修改 OLLAMA_VISION_MODEL）</p>
             </div>
           }
@@ -446,92 +443,100 @@ const SystemSettings = () => {
         }
         style={{ marginBottom: 16 }}
         extra={
-          llmProviderConfig?.gemini_api_key_set && (
-            <Tag color="green">Gemini Key 已設定</Tag>
+          llmProviderConfig && (
+            llmProviderConfig.aihub_api_key_set
+              ? <Tag color="green">AiHub Key 已設定 ({llmProviderConfig.aihub_api_key_preview})</Tag>
+              : <Tag color="orange">AiHub Key 未填寫</Tag>
           )
         }
       >
         <Alert
-          message="可獨立切換 LLM 與 Embedding 的後端"
+          message="只有「文字模型」可切換後端"
           description={
             <div>
-              <p><strong>LLM:</strong> 給 Agent / RAG 回答用 — 本地 Ollama 私密但慢、Gemini 雲端快但需要 API key。</p>
-              <p><strong>Embedding:</strong> 文件向量化用 — 建議留 Ollama 本地,免重打 API、向量維度也不會變。</p>
-              <p style={{ marginBottom: 0 }}><strong>注意:</strong>切換 embedding 後端後,舊向量會跟新模型不相容,需重新向量化所有文件。</p>
+              <p><strong>文字模型:</strong> 給 Agent / RAG 回答用 — 本地 Ollama 私密但吃 GPU、AiHub 雲端快且不佔顯卡。</p>
+              <p><strong>Embedding 與 VL:</strong> 固定使用本地 Ollama — AiHub 沒有這兩種端點,且換 embedding 需重建全部向量。</p>
+              <p style={{ marginBottom: 0 }}>
+                <strong>AiHub API Key:</strong> 只從後端 <code>.env</code> 的 <code>AIHUB_API_KEY</code> 讀取,
+                不在此介面輸入或儲存(企業憑證不寫進資料庫)。修改後需重啟後端。
+              </p>
             </div>
           }
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
         />
+        {llmProviderConfig && !llmProviderConfig.aihub_api_key_set && (
+          <Alert
+            message="尚未設定 AIHUB_API_KEY"
+            description={<span>要使用 AiHub 雲端模型,請在後端 <code>backend/.env</code> 加入 <code>AIHUB_API_KEY=...</code> 後重啟服務。未設定時只能選 Ollama。</span>}
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+          />
+        )}
 
         <Form
           form={llmProviderForm}
           layout="vertical"
           onFinish={handleSaveLlmProvider}
-          initialValues={{ llm_provider: "ollama", embedding_provider: "ollama" }}
+          initialValues={{ llm_provider: "ollama" }}
         >
           <Row gutter={16}>
             <Col span={8}>
-              <Form.Item label="LLM 後端" name="llm_provider">
+              <Form.Item label="文字模型後端" name="llm_provider">
                 <Radio.Group size="small">
-                  <Radio.Button value="ollama">Ollama</Radio.Button>
-                  <Radio.Button value="gemini">Gemini</Radio.Button>
+                  <Radio.Button value="ollama">Ollama(本地)</Radio.Button>
+                  <Radio.Button value="aihub" disabled={!llmProviderConfig?.aihub_api_key_set}>
+                    AiHub(雲端)
+                  </Radio.Button>
                 </Radio.Group>
               </Form.Item>
               <Form.Item
                 noStyle
                 shouldUpdate={(prev, curr) => prev.llm_provider !== curr.llm_provider}
               >
-                {({ getFieldValue }) => (
-                  <Form.Item
-                    label="LLM 模型 ID"
-                    name="llm_model"
-                    extra="可從下拉選或自行輸入。空 = 用 .env 預設"
-                  >
-                    <AutoComplete
-                      options={getFieldValue("llm_provider") === "gemini" ? PRESET_LLM_GEMINI : PRESET_LLM_OLLAMA}
-                      placeholder="例:gemma4:e2b"
-                      filterOption={filterOption}
-                      allowClear
-                    />
-                  </Form.Item>
-                )}
+                {({ getFieldValue }) => {
+                  const isAihub = getFieldValue("llm_provider") === "aihub";
+                  return (
+                    <Form.Item
+                      label="文字模型 ID"
+                      name="llm_model"
+                      extra={isAihub
+                        ? "AiHub 模型代號,也可填 service/version(如 local/gpt-oss)"
+                        : "可從下拉選或自行輸入。空 = 用 .env 預設"}
+                    >
+                      <AutoComplete
+                        options={isAihub ? PRESET_LLM_AIHUB : PRESET_LLM_OLLAMA}
+                        placeholder={isAihub ? "例:gpt-oss" : "例:gemma4:e2b"}
+                        filterOption={filterOption}
+                        allowClear
+                      />
+                    </Form.Item>
+                  );
+                }}
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item label="Embedding 後端" name="embedding_provider">
-                <Radio.Group size="small">
-                  <Radio.Button value="ollama">Ollama</Radio.Button>
-                  <Radio.Button value="gemini">Gemini</Radio.Button>
-                </Radio.Group>
+              <Form.Item label="Embedding 後端">
+                <Tag>Ollama(本地,固定)</Tag>
               </Form.Item>
               <Form.Item
-                noStyle
-                shouldUpdate={(prev, curr) => prev.embedding_provider !== curr.embedding_provider}
+                label="Embedding 模型 ID"
+                name="embedding_model"
+                extra="切換後舊向量與新模型不相容,需重跑向量化"
               >
-                {({ getFieldValue }) => (
-                  <Form.Item
-                    label="Embedding 模型 ID"
-                    name="embedding_model"
-                    extra="切換後舊向量與新模型不相容,需重跑向量化"
-                  >
-                    <AutoComplete
-                      options={getFieldValue("embedding_provider") === "gemini" ? PRESET_EMBED_GEMINI : PRESET_EMBED_OLLAMA}
-                      placeholder="例:bge-large-zh-v1.5"
-                      filterOption={filterOption}
-                      allowClear
-                    />
-                  </Form.Item>
-                )}
+                <AutoComplete
+                  options={PRESET_EMBED_OLLAMA}
+                  placeholder="例:bge-large-zh-v1.5"
+                  filterOption={filterOption}
+                  allowClear
+                />
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item label="VL 後端" name="vision_provider">
-                <Radio.Group size="small">
-                  <Radio.Button value="ollama">Ollama</Radio.Button>
-                  <Radio.Button value="gemini" disabled>Gemini (TODO)</Radio.Button>
-                </Radio.Group>
+              <Form.Item label="VL 後端">
+                <Tag>Ollama(本地,固定)</Tag>
               </Form.Item>
               <Form.Item
                 label={<Space>VL 模型 ID <EyeOutlined /></Space>}
@@ -548,17 +553,6 @@ const SystemSettings = () => {
               </Form.Item>
             </Col>
           </Row>
-          <Form.Item
-            label="Gemini API Key"
-            name="gemini_api_key"
-            extra={
-              llmProviderConfig?.gemini_api_key_set
-                ? `目前已設定 (${llmProviderConfig.gemini_api_key_preview}) — 留空保留,輸入新值會覆寫。`
-                : "從 Google AI Studio 取得 — https://aistudio.google.com/apikey"
-            }
-          >
-            <Input.Password placeholder="留空保留原設定" autoComplete="off" />
-          </Form.Item>
           <Divider />
           <Form.Item>
             <Space>
@@ -867,7 +861,7 @@ const SystemSettings = () => {
               <p>刪除所有向量值將保留所有文件和文本內容，只刪除向量數據（embeddings）和 FAISS 索引。</p>
               <p><strong>何時需要刪除向量值：</strong></p>
               <ul style={{ marginBottom: 0 }}>
-                <li>更改了 embedding 模型（例如從 text-embedding-004 升級到 gemini-embedding-001）</li>
+                <li>更改了 embedding 模型（例如從 bge-large-zh 換成 qwen3-embedding）</li>
                 <li>修改了向量處理參數（overlap、max_chars 等）</li>
                 <li>FAISS 索引損壞或向量維度不匹配</li>
                 <li>想要重新開始建立向量索引</li>

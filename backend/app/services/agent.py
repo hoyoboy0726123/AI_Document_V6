@@ -950,6 +950,12 @@ def _norm_for_match(s: str) -> str:
     for canon, zhs in _UNIT_ZH:
         for z in zhs:
             t = t.replace(z, canon)
+    # 規範原文常把百分比寫成「90-percent」「90 percent」，問句寫「90%」。
+    # 不統一的話前提查核會把明明有依據的數值標成「未找到依據」——實測 v25
+    # 的 90% 就被誤掛 ⚠️ 橫幅，而原文寫的是 90-percent relative humidity。
+    # 註：此時空白已被刪掉，percent 後面接的是下一個字（relative…），
+    # 不能用 \b 當結尾，只能綁在「數字＋(-)percent」這個形狀上。
+    t = re.sub(r"(\d)-?percent", r"\1%", t)
     return t
 
 

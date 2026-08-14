@@ -57,3 +57,7 @@ backend/scripts/*_eval.json
 
 # DB 備份（migration 前留存，體積大且含實際資料）
 backend/doc_management.db.bak*
+
+# 切換 provider 時的本機 .env 備份
+backend/.env.bak*
+backend/doc_management.db.bak*

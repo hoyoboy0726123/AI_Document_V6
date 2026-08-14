@@ -160,6 +160,17 @@ class Settings(BaseSettings):
     # 翻譯常撞 15 秒上限（實測 gemma 基線一輪就逾時 6 次），逾時 = 該查詢完全
     # 失去 BM25 訊號。指定一個快的小模型（如 qwen3:8b）讓翻譯穩定在數秒內。
     RAG_TRANSLATE_MODEL: str | None = None
+
+    # ── ASUS AiHub OpenAPI（企業內部雲端模型閘道）────────────────
+    # LLM_PROVIDER=aihub 時生效。沒有 embedding 端點，EMBEDDING_PROVIDER 維持 ollama。
+    AIHUB_API_KEY: str | None = None
+    AIHUB_BASE_URL: str = "https://stage-iotapi.asus.com/aoccgpt2/v1/openapi"
+    # 模型寫法：service/version（如 local/gpt-oss），或用 aihub_provider 內的簡寫
+    AIHUB_MODEL: str = "gpt-oss"
+    # session 有狀態但對 RAG 無害（自足 prompt，實測 12 輪零污染）。
+    # 池化是為了省掉每題 1.55 秒的 new_session；仍設輪替上限當保險。
+    AIHUB_SESSION_POOL: int = 4
+    AIHUB_SESSION_MAX_USES: int = 200
     # 融合後餵進 LLM 的「context 塊數」上限。hybrid recall 高但塊一多就破碎，
     # 過多分散塊會讓生成退化；超出的命中仍會列在 sources（前端可預覽），只是不進 LLM context。
     RAG_MAX_CONTEXT_CHUNKS: int = 6

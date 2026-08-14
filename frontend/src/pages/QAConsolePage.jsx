@@ -44,10 +44,14 @@ const uniqueDocsFromSources = (sources) => {
   });
 };
 
+// 一次渲染的對話則數上限。整條展開會把渲染程序撐爆（見渲染處註解）。
+const HISTORY_PAGE_SIZE = 20;
+
 const QAConsolePage = () => {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [conversationHistory, setConversationHistory] = useState([]);
+  const [visibleCount, setVisibleCount] = useState(HISTORY_PAGE_SIZE);
   const [streamingMsg, setStreamingMsg] = useState(null);
   // streamingMsg: { question, thinking, answer, isStreaming, thinkingDone, sources, is_followup, optimized_query }
   const [classifications, setClassifications] = useState([]);
@@ -168,6 +172,7 @@ const QAConsolePage = () => {
 
     activeConvIdRef.current = id;
     setActiveConvId(id);
+    setVisibleCount(HISTORY_PAGE_SIZE);
     if (!id) { setConversationHistory([]); return; }
     try {
       const res = await apiClient.get(`rag/conversations/${id}`);
@@ -433,6 +438,7 @@ const QAConsolePage = () => {
               timestamp: new Date().toISOString(),
             };
             setConversationHistory((h) => [...h, newMsg]);
+            setVisibleCount((n) => n + 1);
           }
           setStreaming(null);
           setLoading(false);
@@ -489,6 +495,7 @@ const QAConsolePage = () => {
               routedMode: prev.routedMode, agentSteps: prev.agentSteps || [], timestamp: new Date().toISOString(),
             };
             setConversationHistory((h) => [...h, newMsg]);
+            setVisibleCount((n) => n + 1);
           }
           setStreaming(null);
           setLoading(false);
@@ -542,6 +549,7 @@ const QAConsolePage = () => {
               timestamp: new Date().toISOString(),
             };
             setConversationHistory((h) => [...h, newMsg]);
+            setVisibleCount((n) => n + 1);
           }
           setStreaming(null);
           setLoading(false);
@@ -743,6 +751,15 @@ const QAConsolePage = () => {
     setDocScopeExpandedKeys(keys);
   }, [folders, documents]);
 
+  // 對話記錄的渲染視窗。整條展開會掛上太多 DOM 節點（見下方渲染處註解）。
+  const visibleHistory = useMemo(() => {
+    const start = Math.max(0, conversationHistory.length - visibleCount);
+    return conversationHistory
+      .slice(start)
+      .map((msg, i) => ({ msg, index: start + i }));
+  }, [conversationHistory, visibleCount]);
+  const hiddenCount = Math.max(0, conversationHistory.length - visibleHistory.length);
+
   // 每次 render 都把最新的送出函式寫進 ref，Composer 拿到的 onSubmit 才能
   // 保持同一個參考（memo 有效）又永遠呼叫到最新的閉包。
   submitRef.current = handleFollowupSubmit;
@@ -835,9 +852,21 @@ const QAConsolePage = () => {
               <Empty description="這條對話還沒有內容，從下方輸入問題開始" style={{ margin: "auto" }} />
             ) : (
               <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 8px" }}>
-                {/* 已完成的對話記錄。memo 化：串流每收到一段文字就更新上層 state，
-                    若歷史訊息跟著重繪，上百則的 ReactMarkdown 會讓整頁卡頓。 */}
-                {conversationHistory.map((msg, index) => (
+                {/* 只渲染最近 visibleCount 則。memo 化擋得住「重繪」，擋不住
+                    「一次掛上太多節點」——「舊對話（V5 匯入）」有 159 則、763 個
+                    來源、456 個 agentSteps（2.4MB），全部展開會讓 Chromium 的
+                    渲染程序直接被砍掉（RESULT_CODE_KILLED）。 */}
+                {hiddenCount > 0 && (
+                  <div style={{ textAlign: "center", margin: "8px 0 16px" }}>
+                    <Button
+                      size="small"
+                      onClick={() => setVisibleCount((n) => n + HISTORY_PAGE_SIZE)}
+                    >
+                      載入更早的訊息（還有 {hiddenCount} 則）
+                    </Button>
+                  </div>
+                )}
+                {visibleHistory.map(({ msg, index }) => (
                   <HistoryMessage
                     key={index}
                     msg={msg}

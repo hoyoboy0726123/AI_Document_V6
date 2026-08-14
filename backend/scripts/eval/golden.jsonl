@@ -16,13 +16,13 @@
 {"id": "v16", "kind": "value", "q": "清潔劑的標準檢驗溫度條件是多少", "gold": ["22 ±2 °C", "72 ±4 °F"], "doc": "MIL-PRF-85570D", "note": "Standard conditions"}
 {"id": "v17", "kind": "value", "q": "清潔化合物要倒入多大的耐壓玻璃瓶", "gold": ["6.4 cm"], "doc": "MIL-PRF-85570D", "note": ""}
 {"id": "v18", "kind": "value", "q": "非揮發性物質測定時烘箱要維持幾度", "gold": ["105 ± 2°C"], "doc": "MIL-PRF-87937D", "note": "4.5.1 Nonvolatile matter"}
-{"id": "v19", "kind": "value", "q": "硬水儲備溶液需要溶解多少醋酸鈣", "gold": ["0.40 ± 0.005 g"], "doc": "MIL-PRF-87937D", "note": ""}
+{"id": "v19", "kind": "value", "q": "20-grain 硬水儲備溶液需要溶解多少醋酸鈣", "gold": ["0.40 ± 0.005 g"], "doc": "MIL-PRF-87937D", "note": "語料同時存在 10-grain(0.20g) 與 20-grain(0.40g) 兩種配方，原問句未指明 grain 數，兩答案皆正確 → 問句補上 20-grain"}
 {"id": "v20", "kind": "value", "q": "油耗測試時進口燃油溫度要維持在幾度", "gold": ["35 ± 3°C", "95 ± 5°F"], "doc": "MIL-PRF-2104L", "note": ""}
 {"id": "v21", "kind": "value", "q": "油耗測試的水套出口溫度要維持在幾度", "gold": ["87.8 ± 3°C", "190 ± 5°F"], "doc": "MIL-PRF-2104L", "note": ""}
 {"id": "v22", "kind": "value", "q": "Falex 試驗前夾具要冷卻到什麼室溫", "gold": ["20 ± 2 °C", "68 ± 4 °F"], "doc": "MIL-PRF-63460E", "note": "4.2.6 Falex"}
 {"id": "v23", "kind": "value", "q": "潤滑劑的磨損防止特性平均磨痕直徑上限是多少", "gold": ["0.8 mm"], "doc": "MIL-PRF-63460E", "note": "Wear Preventive"}
 {"id": "v24", "kind": "value", "q": "低溫極值搭配的相對濕度假設是多少度", "gold": ["68.4°C"], "doc": "MIL-HDBK-310", "note": "5.1.2 氣候極值"}
-{"id": "v25", "kind": "value", "q": "低溫極值搭配 90% 相對濕度時，60 年一遇的霜點是多少", "gold": ["-67.8°C", "-90°F"], "doc": "MIL-HDBK-310", "note": "MIL-HDBK-310 5.1.2（原問「露點」但原文是 frost point 霜點，且為負值）"}
+{"id": "v25", "kind": "value", "q": "低溫極值搭配 90% 相對濕度時，60 年一遇的霜點是多少", "gold": ["-69.5°C", "-93°F"], "doc": "MIL-HDBK-310", "note": "MIL-HDBK-310 5.1.2（原問「露點」但原文是 frost point 霜點，且為負值） | 修正：60 年一遇是 -69.5°C(-93°F)；原 gold 的 -67.8°C 是 30 年一遇"}
 {"id": "v26", "kind": "value", "q": "可靠度測試的溫度變化率是每分鐘幾度", "gold": ["1.5°C"], "doc": "MIL-HDBK-781A", "note": ""}
 {"id": "v27", "kind": "value", "q": "可靠度測試選定的中間溫度層級是幾度", "gold": ["35.8°C"], "doc": "MIL-HDBK-781A", "note": ""}
 {"id": "v28", "kind": "value", "q": "機翼掛載的加速度需求是多少 g", "gold": ["7.75A"], "doc": "MIL-STD-810H", "note": "Method 513.8 表格"}
