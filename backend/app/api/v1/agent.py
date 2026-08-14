@@ -146,8 +146,15 @@ def agent_route(
                     else:
                         yield _sse(etype or "info", evt)
             else:
-                final_text, final_sources = agent.run_rag_only(db, question, conversation_history=history)
-                yield _sse("final", {"text": final_text, "sources": final_sources})
+                # 檢索完成就先送 sources（約 2.4 秒），答案再等雲端 LLM。
+                # AiHub 整層不支援 streaming，不先推來源的話使用者要盯著空白轉圈 20 秒。
+                for _kind, _payload in agent.run_rag_only_events(
+                        db, question, conversation_history=history):
+                    if _kind == "sources":
+                        yield _sse("sources", {"sources": _payload})
+                    elif _kind == "final":
+                        final_text, final_sources = _payload
+                        yield _sse("final", {"text": final_text, "sources": final_sources})
 
             saved = conversations.append_message(
                 db, user_id, conversation_id,

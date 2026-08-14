@@ -478,10 +478,18 @@ const QAConsolePage = () => {
             setStreaming((prev) => prev ? { ...prev, routedMode: data.mode, agentMode: data.mode === "agent" } : null);
             return;
           }
+          if (eventName === "sources") {
+            // 檢索完成的先行來源（約 2.4 秒），讓等生成的 20 秒不是空白。
+            // thinkingDone 一併打開，renderSources 才會顯示。
+            setStreaming((prev) => prev
+              ? { ...prev, sources: data.sources || [], thinkingDone: true, sourcesPreliminary: true }
+              : null);
+            return;
+          }
           setStreaming((prev) => prev ? { ...prev, agentSteps: [...(prev.agentSteps || []), { event: eventName, ...data }] } : null);
         },
         onFinal: (data) => {
-          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
+          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true, sourcesPreliminary: false } : null);
         },
         onDone: (doneEvt) => {
           syncConversationId(doneEvt);
@@ -908,7 +916,11 @@ const QAConsolePage = () => {
                           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{streamingMsg.answer}</ReactMarkdown>
                         ) : (
                           <Text type="secondary" style={{ fontStyle: "italic" }}>
-                            {streamingMsg.agentMode ? "Agent 推理中..." : (streamingMsg.thinkingDone ? "生成回答中..." : "AI 思考中...")}
+                            {streamingMsg.agentMode
+                              ? "Agent 推理中..."
+                              : (streamingMsg.sourcesPreliminary
+                                ? `已找到 ${streamingMsg.sources?.length ?? 0} 個來源（見下方），生成回答中...`
+                                : (streamingMsg.thinkingDone ? "生成回答中..." : "AI 思考中..."))}
                           </Text>
                         )}
                       </div>

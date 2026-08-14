@@ -1308,9 +1308,17 @@ def route_mode(question: str) -> str:
     return "rag"
 
 
-def run_rag_only(db: Session, question: str,
-                 conversation_history: Optional[List[Dict[str, Any]]] = None):
-    """混合路由的純 RAG 分支：與 /rag/query 同一條檢索 + grounded 合成，回 (answer, sources)。"""
+def run_rag_only_events(db: Session, question: str,
+                        conversation_history: Optional[List[Dict[str, Any]]] = None):
+    """混合路由的純 RAG 分支，以事件形式產出：
+
+        ("sources", [...])          檢索一完成就先送（約 2.4 秒）
+        ("final", (answer, sources)) 生成完成（雲端 LLM 約 20 秒）
+
+    為什麼要分兩段：AiHub 閘道整層不支援 streaming（v0.9 移除，實測五個模型
+    都回同一個伺服器端錯誤），答案只能等整段回來。先把檢索結果推出去，
+    使用者 2.4 秒就能讀原文，而不是盯著空白轉圈 20 秒。
+    """
     # 查詢改寫（單一入口）。承接「鹽霧測試的箱體溫度」之後問「那濕度呢」，
     # 沒有改寫就會撈回濕度測試的內容。
     _resolved = resolve_query(question, conversation_history)
@@ -1345,10 +1353,17 @@ def run_rag_only(db: Session, question: str,
             # 誠實說沒有，遠好過拿另一項測試的數值來充數。
             subj = _find_subject(question)
             logger.info("主體「%s」重查後仍無相關段落，改為誠實回覆", subj)
-            return (f"可用段落中找不到「{subj}」相關測試對此問題的規定 —— "
+            yield ("final", (f"可用段落中找不到「{subj}」相關測試對此問題的規定 —— "
                     f"檢索到的內容屬於其他測試項目，不能直接套用。\n\n"
                     f"建議確認該項參數是否確實由此測試規範，或改以規範編號／方法編號查詢。",
-                    [])
+                    []))
+            return
+
+    # 檢索已定案 → 先把來源推出去，讓使用者在等生成的 20 秒內就能讀原文。
+    if seeded:
+        yield ("sources", [{"document_id": ev.get("document_id"), "title": ev.get("title"),
+                            "page": ev.get("page"), "snippet": ev.get("snippet"),
+                            "score": ev.get("score")} for ev in seeded[:5]])
 
     # 低信心兜底 —— 這道防線原本只存在於 rag.py 的 /query 端點，這裡漏了，
     # 而本函式正是「混合模式路由到 RAG 分支」時實際跑的程式碼。
@@ -1373,20 +1388,32 @@ def run_rag_only(db: Session, question: str,
                         "page": ev.get("page"), "snippet": ev.get("snippet"),
                         "score": ev.get("score")} for ev in seeded[:5]]
             logger.info("run_rag_only 低信心兜底：CE=%.3f < %.2f", _conf, _thr)
-            return ai.low_confidence_answer(question, closest), low_src
+            yield ("final", (ai.low_confidence_answer(question, closest), low_src))
+            return
 
     ans, sources, n_used, n_total = _grounded_synthesis(db, question, seeded, [], conversation_history,
                                                     retry_budget=_new_retry_budget())
     if ans and ans.strip():
         note = _coverage_note(max(0, n_total - n_used), 0)
-        return subject_caution + ans.strip() + (note or ""), sources
+        yield ("final", (subject_caution + ans.strip() + (note or ""), sources))
+        return
     closest = [{"title": ev.get("title"), "page": ev.get("page"), "text": ev.get("snippet")}
                for ev in seeded[:3]]
     low_src = [{"document_id": ev.get("document_id"), "title": ev.get("title"), "page": ev.get("page"),
                 "snippet": ev.get("snippet"), "score": ev.get("score")} for ev in seeded[:5]]
     text = ai.low_confidence_answer(question, closest) if closest else "查無足夠的相關內容，請提供更多文件或調整問題。"
-    return text, low_src
+    yield ("final", (text, low_src))
 
+
+
+def run_rag_only(db: Session, question: str,
+                 conversation_history: Optional[List[Dict[str, Any]]] = None):
+    """同 run_rag_only_events，但一次回 (answer, sources)。給不需要中途事件的呼叫端。"""
+    out = ("查無足夠的相關內容，請提供更多文件或調整問題。", [])
+    for kind, payload in run_rag_only_events(db, question, conversation_history):
+        if kind == "final":
+            out = payload
+    return out
 
 def _pick_spec_center(candidates: List[str], question: str) -> Optional[str]:
     """從查過的規範中挑「問題裡實際提到的那個」當主體，避免被後續查的別的規範蓋掉
