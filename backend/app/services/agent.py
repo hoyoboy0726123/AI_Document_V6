@@ -22,7 +22,7 @@ from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
-from . import agent_tools, ai
+from . import agent_tools, ai, retrieval
 from ..core.config import settings
 from .llm_provider import get_llm_provider
 from .system_config import SystemConfigService
@@ -1143,7 +1143,12 @@ def _synthesize_grounded(
     # 「標記⚠️頁距的來源極可能屬於不同測試項目…優先捨棄」的防污染規則
     # 在 agent 模式下是死的 —— 而 agent 恰恰最需要它：證據來自 seed 檢索、
     # LLM 自由 rag_search、補查、KG 子項四個來源混合，頁碼跨度遠大於純 RAG。
-    primary_page = next((e.get("page") for e, _ in deduped if e.get("page")), None)
+    # 但頁距只在同一份文件內有意義（跨文件頁碼不同座標系）——
+    # 主命中取「第一個同時有頁碼與文件識別的證據」，跨文件證據回 None 不警示。
+    primary_ev = next((e for e, _ in deduped
+                       if e.get("page") and e.get("document_id")), None)
+    primary_page = primary_ev.get("page") if primary_ev else None
+    primary_doc_id = primary_ev.get("document_id") if primary_ev else None
     for ev, text in deduped:
         if used + len(text) > budget:
             text = text[: max(0, budget - used)]
@@ -1154,8 +1159,8 @@ def _synthesize_grounded(
             "source_num": len(contexts) + 1,
             "title": ev.get("title") or "",
             "page": ev_page,
-            "page_gap": (abs(ev_page - primary_page)
-                         if primary_page and ev_page else None),
+            "page_gap": retrieval.page_gap_within_doc(
+                primary_doc_id, primary_page, ev.get("document_id"), ev_page),
             "text": text,
         })
         used_sources.append({

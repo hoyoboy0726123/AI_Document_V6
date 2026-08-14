@@ -139,6 +139,25 @@ def context_keep_ids(filtered) -> set:
     return set(ordered_kept)
 
 
+def page_gap_within_doc(
+    primary_doc_id: Optional[str],
+    primary_page: Optional[int],
+    doc_id: Optional[str],
+    page: Optional[int],
+) -> Optional[int]:
+    """主命中與某來源的頁距 —— 只在同一份文件內才有意義。
+
+    頁碼是「文件內」座標：A 文件第 3 頁與 B 文件第 250 頁之間不存在「頁距 247」。
+    跨文件（或頁碼/文件識別缺漏）一律回 None —— _page_label 對 None 只印頁碼、
+    不加 ⚠️ 警示，提示詞的「頁距大→優先捨棄」規則便不會誤傷合法的跨文件來源。
+    """
+    if not (primary_doc_id and primary_page and page):
+        return None
+    if doc_id != primary_doc_id:
+        return None
+    return abs(page - primary_page)
+
+
 def _get_vector_config(db: Session, vector_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if vector_config is not None:
         return vector_config
