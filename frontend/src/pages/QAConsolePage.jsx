@@ -415,7 +415,7 @@ const QAConsolePage = () => {
           } : null);
         },
         onFinal: (data) => {
-          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
+          setStreaming((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true, sourcesPreliminary: false } : null);
         },
         onDone: (doneEvt) => {
           syncConversationId(doneEvt);
@@ -530,7 +530,10 @@ const QAConsolePage = () => {
         onThinking: (text) =>
           setStreaming((prev) => prev ? { ...prev, thinking: prev.thinking + text } : null),
         onContent: (text) =>
-          setStreaming((prev) => prev ? { ...prev, answer: prev.answer + text } : null),
+          setStreaming((prev) => prev ? { ...prev, answer: prev.answer + text, sourcesPreliminary: false } : null),
+        // 純 RAG 的 sources 現在在生成「之前」送達（與混合模式一致）。
+        // sourcesPreliminary 讓等待文案顯示「已找到 N 個來源，生成回答中…」；
+        // 第一段 content 到達時再取消該標記。
         onSources: (event) =>
           setStreaming((prev) =>
             prev ? {
@@ -539,6 +542,7 @@ const QAConsolePage = () => {
               is_followup: event.is_followup ?? false,
               optimized_query: event.optimized_query ?? null,
               thinkingDone: true,
+              sourcesPreliminary: !prev.answer,
             } : null
           ),
         onDone: (doneEvt) => {

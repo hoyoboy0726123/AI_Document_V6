@@ -489,11 +489,26 @@ def generate_rag_answer_stream(
     provider = get_llm_provider()
     if getattr(provider, "name", "ollama") == "ollama":
         client = get_client()
-        for chunk in client.chat_stream(messages, model=settings.OLLAMA_LLM_MODEL, think=False):
-            yield chunk
+        raw = client.chat_stream(messages, model=settings.OLLAMA_LLM_MODEL, think=False)
     else:
-        for chunk in provider.chat_stream(messages):
+        raw = provider.chat_stream(messages)
+    # 形狀守衛：呼叫端（/rag/query/stream）以 chunk["type"] == "content" 取文字，
+    # provider 若回別的形狀，答案會被「靜默丟棄」——畫面只剩參考來源、
+    # 存檔的 answer 是空字串，而且完全沒有錯誤訊息。實測 AiHub provider 初版
+    # 誤用 Ollama HTTP 原始格式就是這樣壞的，所以這裡寧可轉換也不要沉默。
+    for chunk in raw:
+        if isinstance(chunk, dict) and chunk.get("type") in ("content", "thinking"):
             yield chunk
+            continue
+        text = ""
+        if isinstance(chunk, dict):
+            text = (chunk.get("message") or {}).get("content") or chunk.get("response") or ""
+        elif isinstance(chunk, str):
+            text = chunk
+        if text:
+            logger.warning("provider %s 的串流 chunk 形狀不符（缺 type），已轉換：%r",
+                           getattr(provider, "name", "?"), str(chunk)[:80])
+            yield {"type": "content", "text": text}
 
 
 _EMBED_MAX_CHARS = 7000  # qwen3-embedding:8b supports 8192 tokens (~7000 English chars)

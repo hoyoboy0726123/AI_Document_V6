@@ -2067,6 +2067,9 @@ def run_agent(
         if seeded:
             yield {"type": "thought", "step": 0,
                    "text": "先以原始問題做一次基準檢索（與 RAG 同一條 pipeline），確保證據齊全且與所用模型無關。"}
+            # 註：這裡刻意「不」送先行來源。Agent 模式的等待期間本來就有
+            # 推理步驟時間軸可看，再插一份會被最終結果覆蓋的來源只是噪音。
+            # 先行來源只用在沒有中途畫面的 RAG 路徑（純 RAG 與混合→RAG）。
     except Exception as e:
         logger.warning("agent seed retrieval failed: %s", e)
 

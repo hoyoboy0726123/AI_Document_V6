@@ -191,11 +191,18 @@ class AiHubProvider:
     def chat_stream(self, messages: List[Dict[str, Any]], *,
                     model: Optional[str] = None,
                     options: Optional[Dict[str, Any]] = None) -> Iterator[Dict[str, str]]:
-        """AiHub v0.9 已移除 streaming；一次取回後以單一 chunk 回吐，
-        讓呼叫端（SSE 端點）不必分支。"""
+        """AiHub v0.9 已移除 streaming（實測五個模型都回同一個伺服器端錯誤），
+        一次取回後以單一 chunk 回吐。
+
+        chunk 形狀必須與 OllamaClient.chat_stream 一致：{"type": "content"|"thinking",
+        "text": ...}，那是本專案內部的正規化格式，不是 Ollama HTTP API 的原始格式。
+        先前照原始格式寫成 {"message": {"content": ...}}，/rag/query/stream 依
+        `chunk.get("type") == "content"` 判斷，於是純 RAG 模式的答案整段被丟掉 ——
+        畫面只剩參考來源，存進對話的 answer 也是空字串。
+        """
         text = self.chat(messages, model=model, options=options)
-        yield {"message": {"content": text}, "done": False}
-        yield {"message": {"content": ""}, "done": True}
+        if text:
+            yield {"type": "content", "text": text}
 
     def generate(self, prompt: str, *,
                  model: Optional[str] = None,

@@ -349,6 +349,10 @@ def query_stream(
         # 就會把它洗掉。三種模式的存檔方式必須一致，才不會有一條路徑漏掉。
         answer_parts = []
         try:
+            # 來源在生成之前就算完了，先送出去 —— 雲端 LLM 不支援 streaming，
+            # 排在生成之後才送等於讓使用者盯著空白 20 秒。與 /agent/route 的
+            # RAG 分支行為一致（兩邊都是「檢索完成即推送」）。
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
             if not contexts:
                 msg = "查無足夠的相關內容，請提供更多文件或調整問題。"
                 answer_parts.append(msg)
@@ -362,7 +366,6 @@ def query_stream(
                     if stream_chunk.get("type") == "content":
                         answer_parts.append(stream_chunk.get("text") or "")
                     yield f"data: {json.dumps(stream_chunk, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
 
             # 串流是逐段送出的，段落級去重當下做不到（需要完整答案）。
             # 存檔前補跑一次，至少讓對話串裡留下的是乾淨版本。
