@@ -1,0 +1,6 @@
+{"id": "n01", "q": "MIL-STD-810H 總共有幾個測試方法？", "gold": "30", "truth": "KG method 節點 30 個"}
+{"id": "n02", "q": "METHOD 514.8 底下總共有幾個子章節？", "gold": "12", "truth": "KG contains 邊 12 條"}
+{"id": "n03", "q": "METHOD 516.8 總共有幾個測試程序？", "gold": "8", "truth": "list_procedures 掃出 Procedure I-VIII"}
+{"id": "n04", "q": "METHOD 504.3 包含幾個附錄？", "gold": "9", "truth": "KG 子項目 9"}
+{"id": "n05", "q": "METHOD 519.8 底下有幾個項目？", "gold": "9", "truth": "KG 子項目 9"}
+{"id": "n06", "q": "METHOD 514.8 全章節總共引用了幾份外部規範？", "gold": "3", "truth": "section_lookup 3 份"}

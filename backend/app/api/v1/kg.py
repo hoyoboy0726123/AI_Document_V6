@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ... import models, schemas
 from ...core.security import get_current_user
 from ...database import get_db
-from ...services import kg_pipeline, kg_service
+from ...services import kg_pipeline, kg_service, kg_tables
 
 router = APIRouter()
 
@@ -241,3 +241,71 @@ def get_stats(
         "type_counts": type_counts,
         "rel_counts": rel_counts,
     }
+
+
+# ── 表格關係抽取 ────────────────────────────────────────────────────
+# 現有的實體抽取只認規範編號（regex）。語料裡真正的結構資訊多半在表格 ——
+# 教育訓練文件 70% 的塊含表格，卻在 KG 裡只有 1 個節點。這組端點讓使用者
+# 指定「哪張表、哪兩欄是代號與名稱」，逐列建成節點與 contains/part_of 邊，
+# 之後 list_subitems 就能完整列舉（列舉題不必再賭向量排序）。
+#
+# 流程刻意是「偵測 → 乾跑預覽 → 確認才寫入 → 可整批回退」：抽取器一旦寫錯
+# 會靜默污染整張圖，看不到結果就上線是這個專案吃過最多虧的模式。
+
+@router.get("/tables/{document_id}")
+def list_document_tables(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """列出文件中所有可抽取的表格（含表頭與前 5 列樣本）。唯讀。"""
+    _ = current_user
+    if not db.query(models.Document).filter_by(id=document_id).first():
+        raise HTTPException(status_code=404, detail="找不到文件")
+    return {"tables": kg_tables.detect_tables(db, document_id)}
+
+
+@router.post("/tables/{document_id}/preview")
+def preview_table_extraction(
+    document_id: str,
+    spec: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """乾跑：回報「會建立什麼」，不寫入任何東西。"""
+    _ = current_user
+    plan = kg_tables.build_plan(db, document_id, spec)
+    if plan.get("error"):
+        raise HTTPException(status_code=400, detail=plan["error"])
+    return plan
+
+
+@router.post("/tables/{document_id}/apply", status_code=status.HTTP_201_CREATED)
+def apply_table_extraction(
+    document_id: str,
+    spec: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """確認後實際寫入 KG。"""
+    _ = current_user
+    res = kg_tables.apply_plan(db, document_id, spec)
+    if res.get("error"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    db.commit()
+    return res
+
+
+@router.delete("/tables/extraction/{parent_name}", status_code=200)
+def remove_table_extraction(
+    parent_name: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """整批回退一次抽取（刪母節點與其所有子節點及邊）。"""
+    _ = current_user
+    res = kg_tables.remove_plan(db, parent_name)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("error") or "回退失敗")
+    db.commit()
+    return res

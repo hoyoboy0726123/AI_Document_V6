@@ -26,6 +26,7 @@ import {
 import AppLayout from "../components/Layout/AppLayout";
 import ClassificationManagement from "../components/Admin/ClassificationManagement";
 import SystemSettings from "../components/Admin/SystemSettings";
+import TableExtractor from "../components/Admin/TableExtractor";
 import apiClient from "../services/api";
 
 const fieldTypeOptions = [
@@ -397,6 +398,11 @@ const AdminPage = () => {
       key: 'system',
       label: '系統設置',
       children: <SystemSettings />,
+    },
+    {
+      key: 'kg-tables',
+      label: '表格關係抽取',
+      children: <TableExtractor />,
     },
     {
       key: 'rag-prompt',

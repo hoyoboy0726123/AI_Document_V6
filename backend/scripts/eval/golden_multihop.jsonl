@@ -1,0 +1,6 @@
+{"id": "m01", "kind": "multihop", "q": "Buying Mode 是 B 的料號，分別屬於哪些料件大類？請列出代號與名稱", "gold": ["CPU", "CHIPSET", "MEMORY", "SYSTEM COMPONENT"], "min_hit": 3, "note": "頁8 mode→料號 ⋈ 頁11 前兩碼→大類名稱"}
+{"id": "m02", "kind": "multihop", "q": "料號 01G013320400 屬於哪一個料件大類？", "gold": ["CPU"], "min_hit": 1, "note": "料號前兩碼 01 → 頁11 對照表"}
+{"id": "m03", "kind": "multihop", "q": "Buying Mode 是 T 的料件屬於哪個大類？", "gold": ["PCB"], "min_hit": 1, "note": "頁8 只有一列 T，前兩碼 08 → PCB"}
+{"id": "m04", "kind": "multihop", "q": "PCB 這個大類的料件，採購模式是哪一種？", "gold": ["T", "Turnkey"], "min_hit": 1, "note": "反向：08 PCB → 頁8 找出 mode"}
+{"id": "m05", "kind": "count", "q": "料件大類總共有幾個代號？", "gold": ["30"], "min_hit": 1, "note": "精確計數；表格 30 個有效代號 | 評分改為比對「共/總共 N 個」的量詞形狀，原本用字串包含會被答案裡任何一個 30 蒙混過關", "match": "count_phrase"}
+{"id": "m06", "kind": "multihop", "q": "MEMORY 類別的代號是什麼？這個類別在 Buying Mode 表中出現過嗎？", "gold": ["03", "B"], "min_hit": 2, "note": "正向查代號 + 反查是否出現在另一張表"}
