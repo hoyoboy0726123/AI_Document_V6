@@ -2048,6 +2048,48 @@ def run_agent(
             yield _emit_final(db, question, body, esrc, seeded)
             return
 
+    # 程序題（有哪些／有幾個程序）提前出口：用 list_procedures 的權威掃描直接作答。
+    #
+    # 為什麼要放在 _structural_evidence「之前」：那個出口沒有程序守衛，實測同一題
+    # 「516.8 總共有幾個測試程序」第一次走到迴圈後的程序區塊（答 8，但先白跑了
+    # 53 秒的 ReAct 迴圈），追問時卻被 structural 出口劫持 —— 純合成只看到檢索
+    # 撈回的 4 個程序，答「只能確認四個」，跟權威掃描的 8 個自相矛盾。
+    #
+    # 補充合成把權威清單塞進 kg_notes，模型才不會在補充段裡重新數一次數出更少。
+    if not _APP_RE.search(question or "") and _PROC_Q_RE.search(question or ""):
+        pr = agent_tools.run_tool(db, "list_procedures", {"name": question})
+        if isinstance(pr, dict) and pr.get("procedures"):
+            yield {"type": "thought", "step": 0,
+                   "text": f"程序題：以方法內文的權威掃描直接作答（{pr.get('count')} 個程序），不進推理迴圈。"}
+            head = pr.get("name") or pr.get("matched")
+            plines = [f"**{head}** 的測試程序（共 {pr.get('count')} 個，掃自方法內文）：", ""]
+            for p in pr["procedures"]:
+                t = p.get("title")
+                plines.append(f"- **Procedure {p['procedure']}**" + (f" — {t}" if t else ""))
+            block = "\n".join(plines)
+            _auth_note = (f"權威清單（方法內文掃描，完整）：{head} 共 {pr.get('count')} 個程序："
+                          + "、".join(f"Procedure {p['procedure']}" for p in pr["procedures"])
+                          + "。檢索段落若只涵蓋其中幾個，是段落覆蓋不全，不代表程序不存在；"
+                            "不要在回答中宣稱總數少於此清單。")
+            rag_part, p_sources = None, []
+            try:
+                _pseed, _ = _seed_evidence_via_rag(db, question, top_k=5)
+                g, p_sources, _n, _t = _grounded_synthesis(
+                    db, question, _pseed, [_auth_note], conversation_history,
+                    retry_budget=_budget)
+                if g and g.strip():
+                    rag_part = g.strip()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("procedure early-exit synthesis failed: %s", e)
+                _pseed = []
+            body = block if not rag_part else f"{block}\n\n── 補充（文件內容檢索）──\n{rag_part}"
+            src = p_sources or [
+                {"document_id": ev.get("document_id"), "title": ev.get("title"),
+                 "page": ev.get("page"), "snippet": ev.get("snippet"), "score": ev.get("score")}
+                for ev in (_pseed or [])[:3]]
+            yield _emit_final(db, question, body, src, _pseed or [])
+            return
+
     # 結構性問題（逐項細節 / 概覽）：用 KG 把「全部子項內容」撈齊(保證完整、含關鍵字漏撈的子項)，
     # 再交給 RAG grounded 合成由 LLM 產生最完整、有引用的答案 —— 不用套版直接回傳。
     try:
