@@ -1,0 +1,73 @@
+{
+  "n": 6,
+  "score": 1.0,
+  "seconds": 127.2,
+  "per_question": [
+    {
+      "id": "n01",
+      "q": "MIL-STD-810H 總共有幾個測試方法？",
+      "gold": "30",
+      "found": [
+        "30"
+      ],
+      "hit": true,
+      "secs": 27.7,
+      "len": 1028
+    },
+    {
+      "id": "n02",
+      "q": "METHOD 514.8 底下總共有幾個子章節？",
+      "gold": "12",
+      "found": [
+        "12"
+      ],
+      "hit": true,
+      "secs": 13.3,
+      "len": 563
+    },
+    {
+      "id": "n03",
+      "q": "METHOD 516.8 總共有幾個測試程序？",
+      "gold": "8",
+      "found": [
+        "8"
+      ],
+      "hit": true,
+      "secs": 34.8,
+      "len": 962
+    },
+    {
+      "id": "n04",
+      "q": "METHOD 504.3 包含幾個附錄？",
+      "gold": "9",
+      "found": [
+        "9"
+      ],
+      "hit": true,
+      "secs": 14.0,
+      "len": 629
+    },
+    {
+      "id": "n05",
+      "q": "METHOD 519.8 底下有幾個項目？",
+      "gold": "9",
+      "found": [
+        "9"
+      ],
+      "hit": true,
+      "secs": 12.1,
+      "len": 568
+    },
+    {
+      "id": "n06",
+      "q": "METHOD 514.8 全章節總共引用了幾份外部規範？",
+      "gold": "2",
+      "found": [
+        "2"
+      ],
+      "hit": true,
+      "secs": 25.4,
+      "len": 389
+    }
+  ]
+}

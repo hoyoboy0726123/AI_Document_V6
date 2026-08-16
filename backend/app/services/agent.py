@@ -1291,13 +1291,25 @@ _ENUM_STRUCT_RE = re.compile(
     # 因為中間那個半形空格而不匹配，route_mode 於是把它送去 RAG 分支，
     # KG 裡明明有完整正確的 ANNEX A–F 清單卻從來沒被用到。
     # 「有幾個 / 包含哪幾個」也是同樣的列舉意圖，原本完全沒涵蓋。
-    r"(有|包含)\s*(哪些|幾個|哪幾個)\s*(測試|方法|程序|步驟|項目|子|method|annex|附錄|章節))",
+    # 「有幾種 / 有多少個」與「幾個」是同一種列舉意圖，原本只收「幾個」，
+    # 於是「516.8 的程序有多少個」被判成 rag，KG 的確定性清單完全沒用上。
+    r"(有|包含)\s*(哪些|幾個|幾種|哪幾個|多少個?)\s*(測試|方法|程序|步驟|項目|子|method|annex|附錄|章節)"
+    r"|(測試|方法|程序|步驟|項目|附錄|章節|method|annex)s?\s*(有|共有|總共有)?\s*(幾個|幾種|多少個?))",
     re.IGNORECASE,
 )
 
 
 # 程序列舉題：「(Method X) 有哪些程序 / 程序有哪些 / what procedures」
-_PROC_Q_RE = re.compile(r"((有)?哪些|列出|列舉|what|which).{0,12}(程序|procedure)s?|(程序|procedure)s?\s*(有哪些|是什麼)", re.IGNORECASE)
+# 程序題。除了「有哪些程序」，也必須認得「有幾個程序」——
+# 計數問法原本抓不到，於是被上游的列舉攔截搶走，回傳 KG 的章節結構
+# （ANNEX A/B/C + SCOPE…共 7 個），而 list_procedures 明明掃得出
+# Procedure I–VIII 共 8 個。實測 MIL 計數題組 n03 就是這樣答錯的。
+_PROC_Q_RE = re.compile(
+    r"((有)?哪些|幾個|幾種|多少個?|列出|列舉|what|which|how\s+many)"
+    r".{0,12}(程序|procedure)s?"
+    r"|(程序|procedure)s?\s*(有哪些|是什麼|有幾個|有幾種|有多少個?)",
+    re.IGNORECASE,
+)
 # 應用題（「我的設備該做哪些測試」）：不要被 spec 關係區塊劫持，交給合成。
 # Audit H17：收窄。舊版單獨的「產品/設備/安裝」名詞出現就 is_app=True → 連
 # 「MIL-STD-810H 對設備的鹽霧測試引用哪些標準？」這種關係題也被封殺所有 KG 確定性答案。

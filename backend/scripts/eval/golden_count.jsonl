@@ -3,4 +3,4 @@
 {"id": "n03", "q": "METHOD 516.8 總共有幾個測試程序？", "gold": "8", "truth": "list_procedures 掃出 Procedure I-VIII"}
 {"id": "n04", "q": "METHOD 504.3 包含幾個附錄？", "gold": "9", "truth": "KG 子項目 9"}
 {"id": "n05", "q": "METHOD 519.8 底下有幾個項目？", "gold": "9", "truth": "KG 子項目 9"}
-{"id": "n06", "q": "METHOD 514.8 全章節總共引用了幾份外部規範？", "gold": "3", "truth": "section_lookup 3 份"}
+{"id": "n06", "q": "METHOD 514.8 全章節總共引用了幾份外部規範？", "gold": "2", "truth": "section_lookup 回 3 筆，但其中 MIL-STD-810H 是 514.8 自己所屬的母規範；問「外部規範」時系統排除自我引用只算 2 筆，這個判讀比原本的 gold 正確"}
