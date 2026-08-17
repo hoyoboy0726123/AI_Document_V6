@@ -547,7 +547,31 @@ def _roman_to_int(s: str) -> int:
 
 # 標題形式（有破折號/冒號 + 大寫起頭的短標題）：PROCEDURE I - BLOWING DUST
 _PROC_TITLE_RE = re.compile(
-    r"\bPROCEDURE\s+([IVXLC]{1,5})\b\s*[-–—:]\s*([A-Z][A-Za-z0-9 ,/()\-]{1,45})",
+    r"\bPROCEDURE\s+([IVXLC]{1,5})\b\s*[-–—:.]\s*([A-Z][A-Za-z0-9 ,/()\-]{1,60})",
+    re.IGNORECASE,  # 514.8 等章節用混合大小寫（Procedure I - General Vibration）
+)
+# 句點分隔（Procedure III. Fragility.）比破折號更容易誤抓普通句子，
+# 標題必須逐字 Title-Case 或全大寫；虛詞開頭一律視為內文而非標題。
+# 錯的名稱會被權威清單當事實印給使用者，抓不準寧可留空。
+_TITLE_STOPWORDS = {"The", "This", "That", "These", "Those", "A", "An", "It",
+                    "If", "When", "Where", "Use", "For", "In", "On", "As", "All",
+                    "Is", "Are", "May", "Shall", "Should", "Will", "Can", "Do", "Does",
+                    "Not", "No", "Refer", "See", "Table", "Figure", "Section", "Paragraph"}
+
+
+_TITLE_CONNECTORS = {"and", "of", "to", "the", "in", "on", "for", "with", "a", "an"}
+
+
+def _plausible_proc_title(t: str) -> bool:
+    words = (t or "").split()
+    if not words or words[0].capitalize() in _TITLE_STOPWORDS:
+        return False
+    return all(w[:1].isupper() or w in _TITLE_CONNECTORS or not w[:1].isalpha()
+               for w in words)
+# 倒裝標題：4.6.4 FRAGILITY (PROCEDURE III)、TEST CONTROLS - FRAGILITY (PROCEDURE III)
+# —— 名稱在前、程序號在括號裡。MIL-STD-810 系列章節標題以這種格式為主。
+_PROC_TITLE_INV_RE = re.compile(
+    r"([A-Z][A-Za-z0-9 ,/\-]{1,60})\s*\(\s*PROCEDURE\s+([IVXLC]{1,5})\s*\)",
 )
 # 僅偵測存在（含無標題者）：PROCEDURE I / Procedure II …（限羅馬數字，避免誤抓 '5. ANALYSIS'）
 _PROC_ANY_RE = re.compile(r"\bPROCEDURE\s+([IVXLC]{1,5})\b", re.IGNORECASE)
@@ -615,9 +639,21 @@ def _tool_list_procedures(db: Session, params: Dict[str, Any]) -> Dict[str, Any]
             events.append((m.start(), "P", m.group(1).upper(), None))
     for m in _PROC_TITLE_RE.finditer(joined):
         if _roman_to_int(m.group(1)) <= 12:
-            events.append((m.start(), "T", m.group(1).upper(), re.split(r"[.\n;]", m.group(2))[0].strip(" -–—:.")))
+            t = re.split(r"[.\n;]", m.group(2))[0].strip(" -–—:.")
+            if _plausible_proc_title(t):
+                events.append((m.start(), "T", m.group(1).upper(), t))
+    for m in _PROC_TITLE_INV_RE.finditer(joined):
+        if _roman_to_int(m.group(2)) <= 12:
+            # 「TEST CONTROLS - FRAGILITY」取最後一段；再剝掉行首殘留的章節號
+            t = m.group(1).split(" - ")[-1]
+            t = re.sub(r"^[\d.\s]+", "", t).strip(" -–—:.")
+            if _plausible_proc_title(t):
+                events.append((m.start(), "T", m.group(2).upper(), t))
     events.sort(key=lambda e: e[0])
-    titles: Dict[str, str] = {}
+    # 同一程序會撈到多個候選標題（正式章節標題重複出現在目錄、TEST CONTROLS、
+    # TEST TOLERANCES…；誤抓的內文片語通常只出現一次）→ 取出現次數最多者。
+    # 先前「最短優先」會讓單次誤抓的短字（如 'Testing'）擠掉正確標題。
+    title_votes: Dict[str, Dict[str, int]] = {}
     present: set = set()
     tpos: Dict[str, int] = {}  # 標題事件位置（優先，指向程序本文開頭）
     ppos: Dict[str, int] = {}  # 任一提及位置（後備）
@@ -632,8 +668,14 @@ def _tool_list_procedures(db: Session, params: Dict[str, Any]) -> Dict[str, Any]
             if kind == "T":
                 if num not in tpos:
                     tpos[num] = _pos
-                if num not in titles or 0 < len(title) < len(titles.get(num) or "9" * 99):
-                    titles[num] = title
+                votes = title_votes.setdefault(num, {})
+                key = (title or "").upper()
+                if key:
+                    votes[key] = votes.get(key, 0) + 1
+    titles: Dict[str, str] = {
+        num: max(votes, key=lambda t: (votes[t], -len(t)))
+        for num, votes in title_votes.items() if votes
+    }
     nums = sorted(present | set(titles.keys()), key=_roman_to_int)
     procs = []
     for n in nums:
