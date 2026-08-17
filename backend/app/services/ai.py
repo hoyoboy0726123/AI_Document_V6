@@ -148,9 +148,18 @@ def _chat_with_provider(
         return _chat_with_ollama(
             messages, model=model, response_format=response_format, think=think
         )
+    # 取樣參數要跟著送。這個分支原本完全不帶 options，於是雲端 provider 用
+    # 服務端預設溫度（非 0），同一題每次答案都不同 —— 本地路徑早就設了
+    # temperature=0 + seed，等於「換一個 provider 就失去可重現性」，而
+    # 改動前後比較（golden set / A-B 測試）全都建立在可重現性上。
+    # 四個 provider（base / ollama / gemini / aihub）的 chat 都收 options。
+    options = {}
+    if getattr(settings, "OLLAMA_TEMPERATURE", None) is not None:
+        options["temperature"] = settings.OLLAMA_TEMPERATURE
     import time
     t0 = time.time()
-    result = provider.chat(messages, model=model, format=response_format)
+    result = provider.chat(messages, model=model, format=response_format,
+                           options=options or None)
     logger.info("_chat_with_provider provider=%s elapsed=%.1fs output_len=%d preview=%s",
                 provider.name, time.time() - t0, len(result), repr(result[:120]))
     return result
