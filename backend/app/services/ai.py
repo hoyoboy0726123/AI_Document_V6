@@ -15,10 +15,54 @@ logger = logging.getLogger(__name__)
 
 # 英文語料實測 4.52 字元/token（Ollama prompt_eval_count 量測）。取 4.0 保守，
 # 因為中文問題與中文答案的比率接近 1，混合後實際值會低於純英文。
-_CHARS_PER_TOKEN = 4.0
+# 沒有樣本可依據時的字元/token 保守值。英文散文實測 4.52，但那是「最鬆」的
+# 一端；估太鬆會讓 prompt 塞爆 num_ctx，所以退化值取中間偏保守。
+_CHARS_PER_TOKEN_FALLBACK = 2.5
+
+_CJK_RE = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿"
+                     r"豈-﫿＀-￯]")
+# token 單位：英文字母串、數字串，其餘每個非空白字元各自成一個單位。
+_TOKEN_UNIT_RE = re.compile(r"[A-Za-z]+|\d+|[^\sA-Za-z\d]")
+# 估算式仍可能低估（實測最差 -17.8%），乘上保險係數讓預算寧可偏小。
+_TOKEN_SAFETY = 0.8
 
 
-def effective_rag_budget() -> int:
+def estimate_tokens(text: str) -> int:
+    """估算一段文字佔多少 token（不呼叫模型，純結構分析）。
+
+    為什麼不能用「字元數 ÷ 固定比例」：非中文的 token 密度會隨內容型態劇烈
+    變動 —— 英文散文約 4.5 字元/token，但表格與料號代碼（`| 01 | CPU |`、
+    `001 INTEL`）每個欄位分隔、數字、短代號都各自成 token，實測只有約 2.2。
+    單一常數必定有一邊估錯，而低估的後果是 prompt 塞爆 num_ctx。
+
+    以 Ollama 的 prompt_eval_count 為基準值驗證（中文語料 3 筆 + 英文散文 1 筆）：
+    本式誤差 -17.8% ~ +50%，原本的固定 4.0 則是 -50% ~ +54%（負值即低估）。
+    """
+    if not text:
+        return 0
+    cjk = len(_CJK_RE.findall(text))
+    n = 0
+    for g in _TOKEN_UNIT_RE.findall(_CJK_RE.sub(" ", text)):
+        if g[0].isalpha():
+            n += 1 + (len(g) - 1) // 5      # 長單字被切成多個 subword
+        elif g[0].isdigit():
+            n += 1 + (len(g) - 1) // 3
+        else:
+            n += 1                           # 標點、表格分隔線各自成 token
+    return cjk + n
+
+
+def chars_per_token(sample: str | None) -> float:
+    """由實際語料估其字元/token 密度，夾在合理範圍內。"""
+    if not sample or len(sample) < 200:
+        return _CHARS_PER_TOKEN_FALLBACK
+    est = estimate_tokens(sample)
+    if est <= 0:
+        return _CHARS_PER_TOKEN_FALLBACK
+    return min(4.5, max(1.2, (len(sample) / est) * _TOKEN_SAFETY))
+
+
+def effective_rag_budget(sample_text: str | None = None) -> int:
     """依實際 OLLAMA_NUM_CTX 動態夾限 RAG context 字數預算。
 
     input+output 共用同一 context window；此函式回傳「可給 context 的字數上限」，
@@ -39,7 +83,7 @@ def effective_rag_budget() -> int:
     overhead_tokens = getattr(settings, "RAG_PROMPT_OVERHEAD_TOKENS", 1500)
     avail_tokens = max(512, nctx - reserve_tokens - overhead_tokens)
     cap = getattr(settings, "RAG_CONTEXT_BUDGET_CHARS", 20000)
-    return max(1500, min(cap, int(avail_tokens * _CHARS_PER_TOKEN)))
+    return max(1500, min(cap, int(avail_tokens * chars_per_token(sample_text))))
 
 
 DOCUMENT_SUGGESTION_SCHEMA: Dict[str, Any] = {
@@ -260,7 +304,16 @@ Return a JSON object strictly following the provided schema.
     }
 
 
-_PAGE_GAP_THRESHOLD = 5  # 頁碼差超過此值視為不同章節
+# 頁碼差超過此值視為不同章節。
+#
+# 注意這個值（5）比檢索端的納入窗（retrieval._PAGE_GAP = 15）小，兩者看起來
+# 互相矛盾：檢索用「15 頁內」決定把來源放進脈絡，提示詞（system_config 的
+# 「標記⚠️頁距的來源…優先捨棄該來源」）卻叫模型丟掉頁距超過 5 的。
+#
+# 曾試過對齊到 15，golden set 實測是淨損（1.000 → 0.949，u14 引用正確率
+# 1.00 → 0.33）—— 警示不只是「別採信」，它同時讓模型把遠距來源與近距來源
+# 分開描述，因而引用標得更準。故意保留這個不對稱，不要「順手對齊」。
+_PAGE_GAP_THRESHOLD = 5
 
 
 def _page_label(block: Dict, idx: int) -> str:

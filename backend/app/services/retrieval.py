@@ -127,14 +127,24 @@ def expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> str
     return _trim_partial_tail(result) if cut else result
 
 
-def context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
+def budget_for(filtered, *, sample_chunks: int = 6) -> int:
+    """用整組候選段落估一次 context 預算（字元）。呼叫端算一次、全程沿用。"""
+    sample = "\n".join((c.text or "") for c, _ in (filtered or [])[:sample_chunks])
+    return ai.effective_rag_budget(sample)
+
+
+def context_text_budgeted(db: Session, chunk, ctx_used: int,
+                          budget: Optional[int] = None) -> str:
     """在「總 context 預算」內做鄰塊擴展。
 
     關鍵：預算用完時必須「截斷到剩餘額度」(或回空)，不能回傳整塊——否則多塊加總會
     超過 num_ctx，導致模型(如 gemma)吃到溢出的 prompt 而吐空，最後落到「暫無足夠資訊」。
     """
     base = chunk.text or ""
-    total_budget = ai.effective_rag_budget()
+    # budget 必須由呼叫端「用整組候選估一次」後傳進來。若每塊各自估，密度低的
+    # 那一塊會給出比較寬鬆的額度，總量隨最後一塊是誰而浮動（實測同一題在
+    # 8374~10262 之間跳動）。留 None 只為向後相容。
+    total_budget = budget if budget is not None else ai.effective_rag_budget(chunk.text or "")
     remaining = total_budget - ctx_used
     if remaining <= 0:
         return ""  # 預算已用完：不再塞，避免 prompt 溢出 num_ctx

@@ -1152,7 +1152,6 @@ def _synthesize_grounded(
     編號 context，套用「只能依段落、標 [來源]、不可跨來源拼湊」的 RAG 模板再生成一次，
     讓 Agent 答案具備 RAG 等級的引用與防幻覺紀律。總長度受 num_ctx 預算限制。
     """
-    budget = ai.effective_rag_budget()
 
     # 先去重，算出「實際有幾筆不重複的檢索證據」(total_unique)，供 Phase 3 完整度判斷
     deduped: List[tuple] = []
@@ -1167,6 +1166,9 @@ def _synthesize_grounded(
         seen.add(key)
         deduped.append((ev, text))
     total_unique = len(deduped)
+
+    # 預算要用「實際要塞進去的證據」估 token 密度，所以擺在去重之後。
+    budget = ai.effective_rag_budget("\n".join(t for _, t in deduped[:6]))
 
     # 在預算內塞入 context；裝不下的就是「檢索到但未展開」的來源
     contexts: List[Dict[str, Any]] = []
