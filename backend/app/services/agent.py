@@ -1220,6 +1220,15 @@ def _synthesize_grounded(
                 "page_gap": None,
                 "text": note_text,
             })
+            # 提示詞把這塊編成「來源N」，模型會照引用；不同步進 used_sources
+            # 會變成 UI 面板缺一個編號（引用校驗的編號映射也會少建一格）。
+            used_sources.append({
+                "document_id": None,
+                "title": "知識圖譜關聯",
+                "page": None,
+                "snippet": note_text,
+                "score": None,
+            })
 
     if not contexts:
         return None, [], 0, total_unique
