@@ -583,7 +583,26 @@ const SystemSettings = () => {
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item label="文字模型後端" name="llm_provider">
-                <Radio.Group size="small">
+                {/* 切換後端時模型 ID 必須跟著換。下方的下拉候選本來就會依後端
+                    切換，但欄位是可自由輸入的 AutoComplete，值不會跟著動 ——
+                    清單換了、值沒換，反而更難察覺。實測把 qwen3:8b 存進 AiHub
+                    後每一次查詢都是 HTTP 500。 */}
+                <Radio.Group
+                  size="small"
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    const cur = llmProviderForm.getFieldValue("llm_model");
+                    const valid = (next === "aihub" ? PRESET_LLM_AIHUB : PRESET_LLM_OLLAMA)
+                      .map((o) => o.value);
+                    // 自行輸入的 service/version 寫法要保留，不要覆蓋掉
+                    if (cur && (valid.includes(cur) || (next === "aihub" && cur.includes("/")))) return;
+                    llmProviderForm.setFieldsValue({
+                      llm_model: next === "aihub"
+                        ? (llmProviderConfig?.aihub_model_default || "gpt-oss")
+                        : "",
+                    });
+                  }}
+                >
                   <Radio.Button value="ollama">Ollama(本地)</Radio.Button>
                   <Radio.Button value="aihub" disabled={!llmProviderConfig?.aihub_api_key_set}>
                     AiHub(雲端)

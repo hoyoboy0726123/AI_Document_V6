@@ -99,8 +99,8 @@ def _context_keep_ids(filtered):
     return retrieval.context_keep_ids(filtered)
 
 
-def _context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
-    return retrieval.context_text_budgeted(db, chunk, ctx_used)
+def _context_text_budgeted(db: Session, chunk, ctx_used: int, budget=None) -> str:
+    return retrieval.context_text_budgeted(db, chunk, ctx_used, budget)
 
 
 @router.post("/query", response_model=schemas.RAGQueryResponse)
@@ -168,6 +168,8 @@ def query_rag(
     primary_page = filtered[0][0].page or 0
     primary_doc_id = filtered[0][0].document_id
     keep_ids = _context_keep_ids(filtered)
+    # 預算用整組候選估一次（見 retrieval.budget_for）：逐塊各自估會讓總量浮動
+    ctx_budget = retrieval.budget_for(filtered)
 
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
@@ -195,7 +197,7 @@ def query_rag(
             # 加入 sources 讓前端顯示，但不傳入 LLM context
             continue
 
-        text = _context_text_budgeted(db, chunk, ctx_used)
+        text = _context_text_budgeted(db, chunk, ctx_used, ctx_budget)
         # 預算用完時會回空字串。原本仍無條件 append，於是 LLM 收到
         #     [來源4] MIL-STD-810H (第 276 頁)
         #     （空白）
@@ -319,6 +321,8 @@ def query_stream(
     primary_page = filtered[0][0].page or 0
     primary_doc_id = filtered[0][0].document_id
     keep_ids = _context_keep_ids(filtered)
+    # 預算用整組候選估一次（見 retrieval.budget_for）：逐塊各自估會讓總量浮動
+    ctx_budget = retrieval.budget_for(filtered)
 
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
@@ -337,7 +341,7 @@ def query_stream(
         ))
         if chunk.id not in keep_ids:
             continue
-        text = _context_text_budgeted(db, chunk, ctx_used)
+        text = _context_text_budgeted(db, chunk, ctx_used, ctx_budget)
         if not text:      # 同上：空脈絡不送進 LLM
             continue
         ctx_used += len(text)

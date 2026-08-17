@@ -599,6 +599,17 @@ def update_llm_provider(
         raise HTTPException(
             status_code=400,
             detail="尚未設定 AIHUB_API_KEY —— 請在後端 .env 填入後重啟服務")
+    # 存進 DB 之前先驗模型代號。兩邊的命名體系完全不同（Ollama 是 tag、
+    # AiHub 是 service/version），切換後端時若把舊的模型名一起存下去，
+    # 之後每一次查詢都會 500，而管理介面只顯示「LLM 模型 qwen3:8b」——
+    # 使用者看到的是「切了但好像沒切成功」，完全對不上真正的原因。
+    # 在存檔當下擋下來，錯誤訊息才會落在使用者正在操作的畫面上。
+    if payload.get("llm_provider") == "aihub" and payload.get("llm_model"):
+        from ...services.llm_provider.aihub_provider import resolve_model
+        try:
+            resolve_model(payload["llm_model"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     db_payload = {}
     if "llm_provider" in payload:
