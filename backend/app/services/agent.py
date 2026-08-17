@@ -938,6 +938,7 @@ def _grounded_synthesis(
     # 引用事後校驗也在迴圈結束後做（同上理由）。sources 與提示詞裡的
     # [來源N] 編號同序（_synthesize_grounded 在同一迴圈建立兩者），
     # 所以 N 對應 sources[N-1]。只換標記編號，不動答案內容。
+    ans = ai.normalize_citation_markers(ans) if ans else ans
     if ans and citation_check_enabled():
         try:
             from . import citation_check

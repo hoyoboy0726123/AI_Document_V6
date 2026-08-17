@@ -156,7 +156,20 @@ def _chat_with_provider(
     return result
 
 
-_CITATION_RE = re.compile(r"\[來源\s*\d+\]")
+# 半形 [來源N] 是提示詞要求的寫法，但雲端模型（實測 AiHub gpt-oss）會自行
+# 改用全形【來源N】。淨化歷史時兩種都要認得，否則追問時舊的來源編號會被
+# 原封不動抄進新一輪，指向完全不同的段落。
+_CITATION_RE = re.compile(r"[\[【]\s*來源\s*\d+\s*[\]】]")
+
+# 全形寫法要在生成後立刻正規化成半形：引用事後校驗（citation_check._MARKER_RE）
+# 與評測腳本都只認 `[來源N]`，模型一改用【來源N】，校驗就變成靜默空轉 ——
+# 沒有錯誤、沒有警告，使用者卻以為引用已經驗證過。
+_FULLWIDTH_CITE_RE = re.compile(r"【\s*來源\s*(\d+)\s*】")
+
+
+def normalize_citation_markers(text: str) -> str:
+    """把【來源N】統一成 [來源N]。只動標記本身，不動任何其他內容。"""
+    return _FULLWIDTH_CITE_RE.sub(r"[來源\1]", text or "")
 
 
 def _strip_citations(text: str) -> str:
@@ -413,7 +426,7 @@ def generate_rag_answer(
     messages = _build_rag_messages(question, context_blocks, conversation_history, system_prompt, user_template)
     # think=False: thinking models (gemma4) otherwise spend 60-120s reasoning per answer
     # and blow past OLLAMA_TIMEOUT. Disabling thinking is ~10x faster with equal/better answers.
-    return _chat_with_provider(messages, think=False)
+    return normalize_citation_markers(_chat_with_provider(messages, think=False))
 
 
 _LOWCONF_TEMPLATE_TIPS = (

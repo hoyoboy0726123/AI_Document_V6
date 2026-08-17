@@ -384,7 +384,9 @@ def query_stream(
             # 引用事後校驗。sources 已在生成「之前」送出（見上方），這裡只在
             # 真的有修正時補送一個 corrected_answer 事件，前端用它替換畫面上
             # 累積的文字 —— 使用者只會看到引用編號在結尾閃一下。
-            final_answer = "".join(answer_parts)
+            # 先把【來源N】正規化成 [來源N]：雲端模型會自行改用全形，
+            # 而校驗與評測都只認半形（見 ai.normalize_citation_markers）。
+            final_answer = ai.normalize_citation_markers("".join(answer_parts))
             if citation_check_enabled():
                 try:
                     from ...services import citation_check
