@@ -134,7 +134,7 @@ def main() -> None:
         for it in items:
             kind, qid = it["kind"], it["id"]
             try:
-                ans, _ = answer(it["q"], route=route_mode(it["q"]))
+                ans, _ = answer(it["q"], route=route_mode(it["q"], db))
             except Exception as exc:  # noqa: BLE001
                 print(f"  [ERR] {qid} {exc}")
                 per_kind[kind]["n"] += 1
@@ -164,7 +164,7 @@ def main() -> None:
                     # _history_subject 讀不到任何東西，量到的「追問跑題」
                     # 有一部分是評測自己造成的。
                     hist = [{"question": it["q"], "answer": ans}]
-                    ans2, _ = answer(it["followup"], hist, route_mode(it["followup"]))
+                    ans2, _ = answer(it["followup"], hist, route_mode(it["followup"], db))
                 except Exception as exc:  # noqa: BLE001
                     ans2 = f"(追問失敗: {exc})"
                 second_ok = _mentions_subject(it["gold_followup_subject"], ans2 or "")

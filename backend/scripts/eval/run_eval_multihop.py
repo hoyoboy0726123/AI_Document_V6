@@ -38,7 +38,7 @@ def norm(s: str) -> str:
 
 def answer(db, q: str) -> str:
     """走混合路由 —— 與使用者實際查詢同一條路。"""
-    if route_mode(q) == "agent":
+    if route_mode(q, db) == "agent":
         out = ""
         for ev in run_agent(db, q):
             if ev.get("type") == "final":
@@ -69,7 +69,9 @@ def main() -> int:
             # 用字串包含會被答案表格裡任何一個相同數字蒙混過關（實測 m05
             # 答「共計 16 個代號」卻因別處出現 30 而被判對）。
             import re as _re
-            found = _re.findall(r"(?:共計|總共|共|合計)\s*(\d{1,4})\s*(?:個|項|筆|種|類)", a or "")
+            # 「共有」原本漏掉（共 後面卡個 有 就不匹配）——量測工具第 16 次出錯。
+            # pattern 與 run_eval_count.py 對齊。
+            found = _re.findall(r"(?:共計|總共|共有|共|合計|一共)\s*(?:有\s*)?(\d{1,4})\s*(?:個|項|筆|種|類)", a or "")
             hit = [g for g in it["gold"] if g in found]
         else:
             hit = [g for g in it["gold"] if norm(g) in na]

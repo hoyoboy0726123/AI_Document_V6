@@ -1,0 +1,84 @@
+{
+  "n": 6,
+  "score": 0.833,
+  "seconds": 98.6,
+  "per_question": [
+    {
+      "id": "m01",
+      "kind": "multihop",
+      "q": "Buying Mode 是 B 的料號，分別屬於哪些料件大類？請列出代號與名稱",
+      "score": 1.0,
+      "hit": [
+        "CPU",
+        "CHIPSET",
+        "MEMORY",
+        "SYSTEM COMPONENT"
+      ],
+      "missing": [],
+      "len": 695,
+      "secs": 35.9
+    },
+    {
+      "id": "m02",
+      "kind": "multihop",
+      "q": "料號 01G013320400 屬於哪一個料件大類？",
+      "score": 1.0,
+      "hit": [
+        "CPU"
+      ],
+      "missing": [],
+      "len": 467,
+      "secs": 12.3
+    },
+    {
+      "id": "m03",
+      "kind": "multihop",
+      "q": "Buying Mode 是 T 的料件屬於哪個大類？",
+      "score": 1.0,
+      "hit": [
+        "PCB"
+      ],
+      "missing": [],
+      "len": 673,
+      "secs": 14.7
+    },
+    {
+      "id": "m04",
+      "kind": "multihop",
+      "q": "PCB 這個大類的料件，採購模式是哪一種？",
+      "score": 1.0,
+      "hit": [
+        "T",
+        "Turnkey"
+      ],
+      "missing": [],
+      "len": 528,
+      "secs": 13.0
+    },
+    {
+      "id": "m05",
+      "kind": "count",
+      "q": "料件大類總共有幾個代號？",
+      "score": 0.0,
+      "hit": [],
+      "missing": [
+        "30"
+      ],
+      "len": 701,
+      "secs": 13.0
+    },
+    {
+      "id": "m06",
+      "kind": "multihop",
+      "q": "MEMORY 類別的代號是什麼？這個類別在 Buying Mode 表中出現過嗎？",
+      "score": 1.0,
+      "hit": [
+        "03",
+        "B"
+      ],
+      "missing": [],
+      "len": 1099,
+      "secs": 9.7
+    }
+  ]
+}

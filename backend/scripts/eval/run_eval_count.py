@@ -20,7 +20,7 @@ _NUM = re.compile(r"(?:共計|總共|共有|共|合計|一共)\s*(?:有\s*)?(\d{
 _NUM2 = re.compile(r"(\d{1,4})\s*(?:個|項|條|份|種|類)\s*(?:測試方法|子章節|測試程序|附錄|項目|外部規範|規範)")
 
 def answer(db, q):
-    if route_mode(q) == "agent":
+    if route_mode(q, db) == "agent":
         out = ""
         for ev in run_agent(db, q):
             if ev.get("type") == "final":

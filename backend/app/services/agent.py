@@ -1333,10 +1333,45 @@ _SPEC_ID_RE = re.compile(
 )
 
 
-def route_mode(question: str) -> str:
-    """混合模式分類：回傳 'agent'（關係/引用/版本/結構列舉題）或 'rag'（純內容題）。"""
+# 通用列舉/計數意圖（不含結構名詞）。名詞交給 KG 判斷，不再用白名單窮舉。
+_GENERIC_ENUM_RE = re.compile(r"(幾個|幾種|幾類|多少個?|哪些|哪幾|列出|列舉|清單)")
+
+
+def _kg_parent_in_question(db: Session, q: str) -> Optional[str]:
+    """問句是否包含某個「KG 母節點」（有 contains 子節點的實體）名稱，回傳最長命中。
+
+    為什麼要這個：_ENUM_STRUCT_RE 的結構名詞白名單（測試/方法/程序/章節…）
+    已四度漏接（ANNEX、幾種、多少個、這次是「代號」）。名詞根本窮舉不完 ——
+    但「KG 裡有誰當母節點」是確定的。改成查 KG：使用者抽了什麼（表格抽取、
+    LLM 抽取），路由就認得什麼，不必每次回來改 regex。
+    """
+    from .. import models
+    try:
+        parent_ids = (db.query(models.KGRelation.src_id)
+                      .filter(models.KGRelation.rel_type == "contains").distinct())
+        rows = db.query(models.KGEntity.name).filter(models.KGEntity.id.in_(parent_ids)).all()
+    except Exception as e:  # noqa: BLE001 — 路由失敗不能拖垮查詢
+        logger.warning("_kg_parent_in_question 查詢失敗: %s", e)
+        return None
+    ql = (q or "").lower()
+    best = None
+    for (nm,) in rows:
+        if nm and len(nm) >= 2 and nm.lower() in ql and len(nm) > len(best or ""):
+            best = nm
+    return best
+
+
+def route_mode(question: str, db: Optional[Session] = None) -> str:
+    """混合模式分類：回傳 'agent'（關係/引用/版本/結構列舉題）或 'rag'（純內容題）。
+
+    db 可選但強烈建議傳入：沒有 db 就只剩 regex 白名單，KG 感知路由（見
+    _kg_parent_in_question）不會生效，「料件大類總共有幾個代號」這類
+    自訂母節點的計數題會被誤送純 RAG，圖譜建了也用不到。
+    """
     q = question or ""
     if _RELATION_RE.search(q) or _ENUM_STRUCT_RE.search(q):
+        return "agent"
+    if db is not None and _GENERIC_ENUM_RE.search(q) and _kg_parent_in_question(db, q):
         return "agent"
     return "rag"
 

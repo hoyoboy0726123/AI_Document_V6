@@ -120,7 +120,13 @@ def agent_route(
     max_steps = payload.max_steps
     user_id = current_user.id
     conversation_id = payload.conversation_id
-    mode = agent.route_mode(question)
+    # KG 感知路由需要 db（見 route_mode docstring）；端點本身沒有 request-scoped
+    # session，開一個短命的用完就關，不與 event_stream 的 session 共用。
+    _rdb = SessionLocal()
+    try:
+        mode = agent.route_mode(question, _rdb)
+    finally:
+        _rdb.close()
 
     def event_stream():
         db = SessionLocal()

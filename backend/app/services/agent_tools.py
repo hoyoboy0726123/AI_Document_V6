@@ -199,9 +199,17 @@ def _tool_list_subitems(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     rows = kg_service.search_entities(db, name, limit=10)
     if not rows:
         # 反向比對：LLM 常傳整句（如「ASUS NB 測試計畫中的 Pressure Test」）。
-        # 找「實體名稱出現在查詢字串內」的結構節點，取最長(最具體)者。
+        # 找「實體名稱出現在查詢字串內」的節點，取最長(最具體)者。
+        # 候選不能只看 section/document 型別 —— 表格抽取/LLM 抽取建的母節點是
+        # term 等自訂型別（如「料件大類」），型別白名單會把它們全擋掉，
+        # 使用者建了圖譜、列舉工具卻永遠找不到。改成「有 contains 子節點的
+        # 實體」一律視為候選母節點：抽了什麼就能列什麼。
         ql = name.lower()
-        cand = db.query(models.KGEntity).filter(models.KGEntity.type.in_(["section", "document"])).all()
+        parent_ids = (db.query(models.KGRelation.src_id)
+                      .filter(models.KGRelation.rel_type == "contains").distinct())
+        cand = db.query(models.KGEntity).filter(
+            models.KGEntity.type.in_(["section", "document"])
+            | models.KGEntity.id.in_(parent_ids)).all()
         rows = sorted(
             [e for e in cand if e.name and _name_in_query(e.name, ql)],
             key=lambda e: len(e.name or ""),
