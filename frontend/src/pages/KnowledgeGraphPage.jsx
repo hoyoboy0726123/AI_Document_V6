@@ -7,6 +7,7 @@ import {
   Empty,
   InputNumber,
   Row,
+  Select,
   Space,
   Spin,
   Statistic,
@@ -72,6 +73,9 @@ const KnowledgeGraphPage = () => {
   const [searchValue, setSearchValue] = useState("");
   const [selectedCanonicalId, setSelectedCanonicalId] = useState(null);
   const [hops, setHops] = useState(2);
+  // 依文件篩選：全庫混畫 41 份文件沒有可讀性，預設仍為全部（不改變既有行為）
+  const [docFilter, setDocFilter] = useState(null);
+  const [docOptions, setDocOptions] = useState([]);
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [loading, setLoading] = useState(false);
   const [selectedNode, setSelectedNode] = useState(null);
@@ -107,6 +111,7 @@ const KnowledgeGraphPage = () => {
     try {
       const params = { hops, limit: center ? 500 : 200 };
       if (center) params.center = center;
+      if (docFilter) params.document_id = docFilter;
       const resp = await apiClient.get("kg/graph", { params });
       const { nodes = [], edges = [] } = resp.data || {};
       setGraphData({
@@ -130,11 +135,17 @@ const KnowledgeGraphPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [hops]);
+  }, [hops, docFilter]);
 
   useEffect(() => {
     loadGraph(selectedCanonicalId);
   }, [loadGraph, selectedCanonicalId]);
+
+  useEffect(() => {
+    apiClient.get("documents/", { params: { page: 1, page_size: 200 } })
+      .then((r) => setDocOptions((r.data?.items ?? []).map((d) => ({ value: d.id, label: d.title }))))
+      .catch(() => {});
+  }, []);
 
   const handleSearch = async (q) => {
     setSearchValue(q);
@@ -244,6 +255,16 @@ const KnowledgeGraphPage = () => {
                 placeholder="輸入規範 ID 或關鍵字..."
                 style={{ width: "100%" }}
                 allowClear
+              />
+              <Select
+                value={docFilter}
+                onChange={setDocFilter}
+                options={docOptions}
+                placeholder="依文件篩選（預設：全部文件）"
+                style={{ width: "100%" }}
+                allowClear
+                showSearch
+                optionFilterProp="label"
               />
               <Space>
                 <Text style={{ fontSize: 12 }}>展開層數</Text>

@@ -111,6 +111,7 @@ def get_graph(
     center: Optional[str] = Query(None, description="entity id or canonical_id; omit for full graph"),
     hops: int = Query(2, ge=1, le=3),
     limit: int = Query(500, ge=10, le=2000),
+    document_id: Optional[str] = Query(None, description="只顯示這份文件貢獻的關係子圖"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -122,9 +123,17 @@ def get_graph(
         if not ent:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="center entity not found")
         nodes, edges = kg_service.get_neighbors(db, ent.id, hops=hops, limit_per_hop=limit)
+        if document_id:
+            edges = [e for e in edges if e.document_id == document_id]
+            keep = {e.src_id for e in edges} | {e.dst_id for e in edges}
+            nodes = [n for n in nodes if n.id in keep]
     else:
-        # full-graph slice — bound by `limit` edges, then resolve nodes
-        edges = db.query(models.KGRelation).limit(limit).all()
+        # 全庫混畫 41 份文件的東西攪在一起沒有可讀性 —— 支援依文件切子圖
+        # （KGRelation 有 document_id；實體跨文件共享，取邊的端點即可）
+        q = db.query(models.KGRelation)
+        if document_id:
+            q = q.filter(models.KGRelation.document_id == document_id)
+        edges = q.limit(limit).all()
         node_ids = {e.src_id for e in edges} | {e.dst_id for e in edges}
         nodes = db.query(models.KGEntity).filter(models.KGEntity.id.in_(node_ids)).all() if node_ids else []
 
