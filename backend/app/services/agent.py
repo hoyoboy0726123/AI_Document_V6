@@ -1349,15 +1349,19 @@ def _kg_parent_in_question(db: Session, q: str) -> Optional[str]:
     try:
         parent_ids = (db.query(models.KGRelation.src_id)
                       .filter(models.KGRelation.rel_type == "contains").distinct())
-        rows = db.query(models.KGEntity.name).filter(models.KGEntity.id.in_(parent_ids)).all()
+        rows = (db.query(models.KGEntity.name, models.KGEntity.meta)
+                .filter(models.KGEntity.id.in_(parent_ids)).all())
     except Exception as e:  # noqa: BLE001 — 路由失敗不能拖垮查詢
         logger.warning("_kg_parent_in_question 查詢失敗: %s", e)
         return None
     ql = (q or "").lower()
     best = None
-    for (nm,) in rows:
-        if nm and len(nm) >= 2 and nm.lower() in ql and len(nm) > len(best or ""):
-            best = nm
+    for nm, meta in rows:
+        # 別名一併比對：同一批實體被 OCR 切成多張表時，母節點只有一個主名稱，
+        # 其餘表的命名（類別代號/領別…）存在 meta.aliases —— 使用者用哪個問都要認得。
+        for cand in [nm] + list((meta or {}).get("aliases") or []):
+            if cand and len(cand) >= 2 and cand.lower() in ql and len(cand) > len(best or ""):
+                best = cand
     return best
 
 

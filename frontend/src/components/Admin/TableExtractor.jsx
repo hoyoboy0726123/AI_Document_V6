@@ -25,7 +25,42 @@ const TableExtractor = () => {
   const [loading, setLoading] = useState(false);
   const [plan, setPlan] = useState(null);
   const [applying, setApplying] = useState(false);
+  const [autoModel, setAutoModel] = useState("");
+  const [autoLoading, setAutoLoading] = useState(false);
+  const [autoResult, setAutoResult] = useState(null);
   const [form] = Form.useForm();
+
+  // AI 自動建議：LLM 判斷每張表值不值得抽、母節點與欄位；規則引擎乾跑驗證。
+  // 大模型逐表分析，一份文件可能要幾分鐘 —— 按鈕上有講，不做輪詢花俏功能。
+  const doAutoSuggest = async () => {
+    if (!docId) return;
+    setAutoLoading(true); setAutoResult(null);
+    try {
+      const r = await apiClient.post(`kg/tables/${docId}/auto-suggest`,
+        autoModel ? { model: autoModel } : {}, { timeout: 900000 });
+      setAutoResult(r.data);
+    } catch (e) {
+      message.error(e.response?.data?.detail ?? "AI 建議失敗");
+    } finally {
+      setAutoLoading(false);
+    }
+  };
+
+  const doAutoApply = async () => {
+    if (!docId) return;
+    setAutoLoading(true);
+    try {
+      const r = await apiClient.post(`kg/tables/${docId}/auto-apply`,
+        autoModel ? { model: autoModel } : {}, { timeout: 900000 });
+      const names = (r.data.applied ?? []).map((a) => `「${a.primary_name}」×${a.n_contains_total}`);
+      message.success(names.length ? `已建立：${names.join("、")}` : "沒有可自動套用的表格");
+      setAutoResult(null);
+    } catch (e) {
+      message.error(e.response?.data?.detail ?? "自動套用失敗");
+    } finally {
+      setAutoLoading(false);
+    }
+  };
 
   const loadDocs = async () => {
     try {
@@ -133,6 +168,42 @@ const TableExtractor = () => {
           </div>
         }
       />
+
+      <Card size="small" type="inner" style={{ marginBottom: 16 }}
+            title={<Space><ExperimentOutlined />AI 自動建議（零手動設定）</Space>}>
+        <Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 8 }}>
+          由本地 LLM 逐表判斷「值不值得抽、母節點叫什麼、哪欄是代號」，規則引擎逐列建節點並驗證；
+          被 OCR 切散的同批表格會自動合併成一個母節點（其餘命名存為別名）。大模型逐表分析，
+          一份文件約需 2~5 分鐘。
+        </Paragraph>
+        <Space wrap>
+          <Input placeholder="模型（留空＝系統預設，例：qwen3.8:27b）" value={autoModel}
+                 onChange={(e) => setAutoModel(e.target.value)} style={{ width: 280 }} />
+          <Button onClick={doAutoSuggest} loading={autoLoading} disabled={!docId}>
+            產生建議（不寫入）
+          </Button>
+          <Button type="primary" onClick={doAutoApply} loading={autoLoading} disabled={!docId}>
+            自動建議並套用
+          </Button>
+        </Space>
+        {autoResult && (
+          <div style={{ marginTop: 12 }}>
+            {(autoResult.groups ?? []).map((g, i) => (
+              <div key={i} style={{ fontSize: 13, marginBottom: 4 }}>
+                <Tag color={g.verdict === "auto" ? "green" : "orange"}>{g.verdict}</Tag>
+                <Text strong>{g.primary_name}</Text>
+                {g.aliases?.length > 0 && <Text type="secondary">（別名：{g.aliases.join("、")}）</Text>}
+                <Text type="secondary" style={{ marginLeft: 8 }}>{g.n_codes_union} 個項目，來自 {g.member_keys.length} 張表</Text>
+              </div>
+            ))}
+            {(autoResult.suggestions ?? []).filter((s) => s.verdict === "skip").length > 0 && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                另有 {(autoResult.suggestions ?? []).filter((s) => s.verdict === "skip").length} 張表被判定不值得抽（排版表/清單快照等）
+              </Text>
+            )}
+          </div>
+        )}
+      </Card>
 
       <Form form={form} layout="vertical" onFinish={doPreview}>
         <Space wrap align="start" style={{ width: "100%" }}>

@@ -210,8 +210,13 @@ def _tool_list_subitems(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
         cand = db.query(models.KGEntity).filter(
             models.KGEntity.type.in_(["section", "document"])
             | models.KGEntity.id.in_(parent_ids)).all()
+
+        def _hit(e) -> bool:
+            names = [e.name] + list((e.meta or {}).get("aliases") or [])
+            return any(n and _name_in_query(n, ql) for n in names)
+
         rows = sorted(
-            [e for e in cand if e.name and _name_in_query(e.name, ql)],
+            [e for e in cand if _hit(e)],
             key=lambda e: len(e.name or ""),
             reverse=True,
         )[:10]

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ... import models, schemas
 from ...core.security import get_current_user
 from ...database import get_db
-from ...services import kg_pipeline, kg_service, kg_tables
+from ...services import kg_auto, kg_pipeline, kg_service, kg_tables
 
 router = APIRouter()
 
@@ -292,6 +292,39 @@ def apply_table_extraction(
     res = kg_tables.apply_plan(db, document_id, spec)
     if res.get("error"):
         raise HTTPException(status_code=400, detail=res["error"])
+    db.commit()
+    return res
+
+
+@router.post("/tables/{document_id}/auto-suggest")
+def auto_suggest_tables(
+    document_id: str,
+    body: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """AI 自動建議：LLM 判斷每張表值不值得抽、母節點名稱與欄位對映，
+    規則引擎乾跑驗證。只讀不寫。body 可帶 {"model": "qwen3.8:27b"}。"""
+    _ = current_user
+    if not db.query(models.Document).filter_by(id=document_id).first():
+        raise HTTPException(status_code=404, detail="找不到文件")
+    return kg_auto.suggest(db, document_id, (body or {}).get("model"))
+
+
+@router.post("/tables/{document_id}/auto-apply", status_code=status.HTTP_201_CREATED)
+def auto_apply_tables(
+    document_id: str,
+    body: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """套用 AI 建議：verdict=auto 的自動寫入；body.keys 指定的表（使用者看過
+    預覽放行）即使 review 也寫入。body 可帶 {"model": ..., "keys": [...]}。"""
+    _ = current_user
+    if not db.query(models.Document).filter_by(id=document_id).first():
+        raise HTTPException(status_code=404, detail="找不到文件")
+    body = body or {}
+    res = kg_auto.auto_apply(db, document_id, body.get("model"), body.get("keys"))
     db.commit()
     return res
 
