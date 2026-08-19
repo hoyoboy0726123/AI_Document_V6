@@ -184,6 +184,42 @@ const TableExtractor = () => {
       </Card>
 
       <Card size="small" type="inner" style={{ marginBottom: 16 }}
+            title={<Text strong>圖譜維護（本文件）</Text>}>
+        <Space wrap>
+          <Button danger disabled={!docId} onClick={() => {
+            Modal.confirm({
+              title: "刪除這份文件的全部圖譜關係？",
+              content: "包含 regex 抽取、表格抽取、LLM 引用抽取建立的所有關係邊。規範實體（節點）保留 —— 它們跨文件共享。原始文件與向量不受影響。",
+              okText: "刪除", okButtonProps: { danger: true }, cancelText: "取消",
+              onOk: async () => {
+                try {
+                  await apiClient.delete(`kg/document/${docId}/relations`);
+                  message.success("已刪除此文件的圖譜關係");
+                } catch (e) {
+                  message.error(e.response?.data?.detail ?? "刪除失敗");
+                }
+              },
+            });
+          }}>
+            刪除此文件的圖譜關係
+          </Button>
+          <Button disabled={!docId} onClick={async () => {
+            try {
+              const r = await apiClient.post(`kg/extract/${docId}`);
+              message.success(r.data.deduplicated ? "已有進行中的抽取任務" : "背景重跑已啟動（regex 結構＋引用），進度見任務橫幅");
+            } catch (e) {
+              message.error(e.response?.data?.detail ?? "啟動失敗");
+            }
+          }}>
+            重跑 regex 抽取（背景）
+          </Button>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            重跑會先清掉本文件既有關係再重建；表格/LLM 抽取的結果需在下方各自重做
+          </Text>
+        </Space>
+      </Card>
+
+      <Card size="small" type="inner" style={{ marginBottom: 16 }}
             title={<Space><ExperimentOutlined />AI 自動建議（零手動設定）</Space>}>
         <Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 8 }}>
           由本地 LLM 逐表判斷「值不值得抽、母節點叫什麼、哪欄是代號」，規則引擎逐列建節點並驗證；
