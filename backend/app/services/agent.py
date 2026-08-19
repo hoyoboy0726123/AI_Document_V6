@@ -479,6 +479,20 @@ def resolve_query(question: str,
                         logger.info("改寫結果缺前輪主詞「%s」，已補上：%s", prev_subj, opt[:60])
             logger.info("查詢改寫（LLM）：「%s」→「%s」", q[:40], opt[:60])
             return {"query": opt, "rewritten": True, "source": "llm"}
+        # 改寫器回傳原句或空 —— 對「自己沒有主詞」的追問句這等於改寫失敗：
+        # 「這個測試要跑多久」原樣進檢索必然跑題（實測連三次撈到 514.8/781A）。
+        # 主詞保全原本只掛在「有改寫」的分支，這條「沒改寫」的路一直是洞。
+        if _lacks_subject(q):
+            prev_q = ""
+            for _turn in reversed(list(conversation_history or [])):
+                prev_q = str(_turn.get("question") or "")
+                if prev_q:
+                    break
+            prev_subj = _find_subject(prev_q)
+            if prev_subj:
+                fixed = f"{prev_subj} {q}"
+                logger.info("改寫器未改寫且問句缺主詞，補前輪主詞：%s", fixed[:60])
+                return {"query": fixed, "rewritten": True, "source": "llm_subject_fix"}
         return {"query": q, "rewritten": False, "source": "llm"}
     except Exception as exc:  # noqa: BLE001
         logger.warning("LLM 查詢改寫失敗，退回規則式：%s", exc)
