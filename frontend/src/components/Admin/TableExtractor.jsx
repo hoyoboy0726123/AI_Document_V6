@@ -205,6 +205,49 @@ const TableExtractor = () => {
         )}
       </Card>
 
+      <Card size="small" type="inner" style={{ marginBottom: 16 }}
+            title={<Space><NodeIndexOutlined />散文引用抽取（LLM，全書背景執行）</Space>}>
+        <Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 8 }}>
+          由 LLM 逐塊找出內文引用的外部規範編號（STANAG、AECTP、TOP 等 regex 不認得的格式也抽得到），
+          每一筆都回原文字面查核，查核不過不入圖。大文件需數十分鐘，故入庫時不自動執行，
+          由管理者在此手動啟動；可整批回退。實測 METHOD 510.7 一章：regex 5 個 → LLM 11 個，零幻覺。
+        </Paragraph>
+        <Space wrap>
+          <Button onClick={async () => {
+            if (!docId) return;
+            setAutoLoading(true);
+            try {
+              const r = await apiClient.post(`kg/citations/${docId}`,
+                autoModel ? { model: autoModel } : {});
+              message.success(r.data.deduplicated ? "已有進行中的抽取任務" : "背景抽取已啟動，進度見上方任務橫幅");
+            } catch (e) {
+              message.error(e.response?.data?.detail ?? "啟動失敗");
+            } finally { setAutoLoading(false); }
+          }} loading={autoLoading} disabled={!docId} type="primary">
+            開始全書引用抽取（背景）
+          </Button>
+          <Button danger onClick={() => {
+            if (!docId) return;
+            Modal.confirm({
+              title: "回退這份文件的 LLM 引用抽取？",
+              content: "刪除本功能建立的所有引用邊；regex 抽的與規範實體不受影響。",
+              okText: "回退", okButtonProps: { danger: true }, cancelText: "取消",
+              onOk: async () => {
+                try {
+                  const r = await apiClient.delete(`kg/citations/${docId}`);
+                  message.success(`已回退 ${r.data.n_relations} 條引用邊`);
+                } catch (e) {
+                  message.error(e.response?.data?.detail ?? "回退失敗");
+                }
+              },
+            });
+          }} disabled={!docId}>
+            回退
+          </Button>
+          <Text type="secondary" style={{ fontSize: 12 }}>模型沿用上方欄位（留空＝系統預設）</Text>
+        </Space>
+      </Card>
+
       <Form form={form} layout="vertical" onFinish={doPreview}>
         <Space wrap align="start" style={{ width: "100%" }}>
           <Form.Item label="文件" style={{ minWidth: 320 }}>

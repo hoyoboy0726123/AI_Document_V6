@@ -329,6 +329,69 @@ def auto_apply_tables(
     return res
 
 
+@router.post("/citations/{document_id}/preview")
+def preview_citations(
+    document_id: str,
+    body: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """LLM 引用抽取「試抽」：限定頁碼範圍同步跑，回報查核後的引用清單，不寫入。
+    body: {"model": ..., "page_lo": int, "page_hi": int}（範圍必填，全書請走背景任務）。"""
+    _ = current_user
+    body = body or {}
+    if body.get("page_lo") is None or body.get("page_hi") is None:
+        raise HTTPException(status_code=400, detail="試抽需指定 page_lo / page_hi（全書請用背景抽取）")
+    if int(body["page_hi"]) - int(body["page_lo"]) > 40:
+        raise HTTPException(status_code=400, detail="試抽範圍請在 40 頁以內")
+    if not db.query(models.Document).filter_by(id=document_id).first():
+        raise HTTPException(status_code=404, detail="找不到文件")
+    return kg_auto.extract_citations(db, document_id, body.get("model"),
+                                     int(body["page_lo"]), int(body["page_hi"]), apply=False)
+
+
+@router.post("/citations/{document_id}", status_code=status.HTTP_202_ACCEPTED)
+def start_citation_extraction(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    body: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """全書 LLM 引用抽取（背景任務）。入庫流程刻意不做這件事 —— 大文件要幾十分鐘，
+    由管理者對特定文件手動啟動。body: {"model": "qwen3.8:27b"}。"""
+    from ...utils.ratelimit import check_quota
+    check_quota(current_user.id, "kg_citation", limit=10, per_seconds=3600)
+    if not db.query(models.Document).filter_by(id=document_id).first():
+        raise HTTPException(status_code=404, detail="找不到文件")
+    existing = (db.query(models.BackgroundTask)
+                .filter(models.BackgroundTask.task_type == "kg_citation",
+                        models.BackgroundTask.document_id == document_id,
+                        models.BackgroundTask.status.in_(("pending", "running"))).first())
+    if existing:
+        return {"task_id": existing.id, "document_id": document_id, "deduplicated": True}
+    task = models.BackgroundTask(task_type="kg_citation", status="pending", progress=0,
+                                 message="等待 LLM 引用抽取開始...",
+                                 document_id=document_id, creator_id=current_user.id)
+    db.add(task); db.commit(); db.refresh(task)
+    background_tasks.add_task(kg_auto.run_citation_task, task.id, document_id,
+                              (body or {}).get("model"))
+    return {"task_id": task.id, "document_id": document_id}
+
+
+@router.delete("/citations/{document_id}", status_code=200)
+def remove_citations(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """整批回退 LLM 引用抽取建立的邊（規範實體保留）。"""
+    _ = current_user
+    n = kg_auto.remove_citations(db, document_id)
+    db.commit()
+    return {"n_relations": n}
+
+
 @router.delete("/tables/extraction/{parent_name}", status_code=200)
 def remove_table_extraction(
     parent_name: str,

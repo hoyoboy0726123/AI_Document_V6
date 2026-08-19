@@ -275,3 +275,189 @@ def auto_apply(db: Session, document_id: str, model: Optional[str] = None,
                         "member_keys": g["member_keys"], "n_new_entities": n_ent,
                         "n_new_relations": n_rel, "n_contains_total": n_contains})
     return {"model": res["model"], "applied": applied, "skipped": skipped}
+
+
+# ═════════════════════════ 散文引用抽取（LLM） ═════════════════════════
+#
+# regex 抽引用的宿命：pattern 白名單窮舉不完。METHOD 510.7 一章實測，
+# 9 組 regex 抓到 5 個外部規範，qwen3.8:27b 抓到 11 個且零幻覺 ——
+# regex 漏的 AECTP/STANAG/TOP/AMR-PS 都是「沒寫進 pattern」的格式。
+# 這裡的驗證環：LLM 抽出的每一筆都回原文做字面比對（容忍括號/換行/連字號
+# 的 OCR 變體），查核不過就不入圖 —— 幻覺被建構性地擋在門外。
+#
+# 觸發方式刻意是「管理者對特定文件手動啟動」：大文件全書掃描要幾十分鐘，
+# 不掛在入庫流程裡（入庫只做切塊/向量化，快進快出）。
+
+_CITE_PROMPT = """從下面的規範文件內文中，找出所有被「引用」的外部標準/規範/文件編號。
+
+包括：軍規（MIL-STD-xxx、MIL-HDBK-xxx、MIL-PRF-xxx、MIL-DTL-xxx）、
+工業標準（ASTM、IEC、ISO、IEEE、SAE、EN、STANAG、AECTP、DEF STAN…）、
+其他官方文件（AR xx-xx、TOP xxx、TB xxx、DoD 指令…）。
+
+規則：
+- 只抽「內文真的出現的編號」，照抄（含版本字尾，如 MIL-STD-810H、ASTM D185-07）。
+  原文若是「(AECTP) 300」這種縮寫展開格式，還原成「AECTP 300」。
+- 本文件系列的自我引用也照抄，之後由程式處理。
+- 沒有就回空陣列。不確定的不要猜。
+
+只輸出 JSON：{"citations": ["...", "..."]}
+
+內文：
+"""
+
+_CITE_EVIDENCE_PREFIX = "llm_citation:"
+
+
+def _norm_cite(s: str) -> str:
+    """查核用正規化：拆掉空白/連字號/括號/逗號 —— OCR 的 (TOP), 01-2-621 也要對得上。"""
+    return re.sub(r"[\s\-–—()（）,，]+", "", s or "").upper()
+
+
+def _canon_cite(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).upper()
+
+
+def _section_entity_for_chunk(db: Session, document_id: str, chunk) -> Optional[models.KGEntity]:
+    """chunk 的章節標籤 → 章節節點；找不到就逐段裁短，最後退回文件節點。"""
+    sp = getattr(chunk, "section_path", None) or ""
+    # section_path 存的是標題字串（「METHOD 510.7」「METHOD 510.7/2.2.1」），
+    # 章節節點的 key 是純編號（510.7、510.7/2.2.1）—— 先剝掉 METHOD/ANNEX 字首再找。
+    parts = [re.sub(r"^\s*(METHOD|ANNEX)\s+", "", seg, flags=re.IGNORECASE).strip()
+             for seg in sp.split("/") if seg.strip()]
+    while parts:
+        ent = (db.query(models.KGEntity)
+               .filter_by(canonical_id=f"doc:{document_id}#{'/'.join(parts)}").first())
+        if ent:
+            return ent
+        parts.pop()
+    return db.query(models.KGEntity).filter_by(canonical_id=f"doc:{document_id}").first()
+
+
+def extract_citations(db: Session, document_id: str, model: Optional[str] = None,
+                      page_lo: Optional[int] = None, page_hi: Optional[int] = None,
+                      apply: bool = False,
+                      progress_cb=None) -> Dict[str, Any]:
+    """LLM 逐塊抽引用 → 逐筆字面查核 → （apply 時）寫成與 regex 管線同形狀的
+    references 邊（src=章節節點、dst=規範實體），evidence 帶 llm_citation: 前綴
+    供整批回退。呼叫端負責 commit。"""
+    from . import kg_extractor
+
+    model = (model or "").strip() or settings.OLLAMA_LLM_MODEL
+    q = (db.query(models.DocumentChunk)
+         .filter(models.DocumentChunk.document_id == document_id))
+    if page_lo is not None:
+        q = q.filter(models.DocumentChunk.page >= page_lo)
+    if page_hi is not None:
+        q = q.filter(models.DocumentChunk.page <= page_hi)
+    chunks = q.order_by(models.DocumentChunk.page, models.DocumentChunk.chunk_index).all()
+
+    verified: Dict[str, Dict[str, Any]] = {}
+    n_claims = n_rejected = 0
+    for i, ch in enumerate(chunks):
+        text = ch.text or ""
+        if progress_cb:
+            progress_cb(i, len(chunks))
+        try:
+            raw = _chat_ollama_cite(_CITE_PROMPT + text, model)
+            cites = [str(c).strip() for c in (json.loads(raw).get("citations") or [])
+                     if str(c).strip()]
+        except Exception as e:  # noqa: BLE001 — 單塊失敗跳過，不拖垮整批
+            logger.warning("引用抽取失敗 chunk=%s: %s", ch.id, e)
+            continue
+        ntext = _norm_cite(text)
+        for c in cites:
+            n_claims += 1
+            if _norm_cite(c) not in ntext:      # 驗證環：原文查無就不收
+                n_rejected += 1
+                continue
+            canon = _canon_cite(c)
+            slot = verified.setdefault(canon, {"pages": set(), "chunks": []})
+            slot["pages"].add(ch.page)
+            slot["chunks"].append(ch)
+
+    result: Dict[str, Any] = {
+        "model": model, "n_chunks": len(chunks), "n_claims": n_claims,
+        "n_rejected": n_rejected,
+        "citations": {k: sorted(v["pages"]) for k, v in sorted(verified.items())},
+    }
+    if not apply:
+        return result
+
+    n_edges = 0
+    for canon, slot in verified.items():
+        # 已知格式交給 regex 的 canonicalize（MIL-STD-810H 等家族有正規形）；
+        # 它不認得的新格式（STANAG…）用正規化字串當 canonical。
+        specs = kg_extractor.extract_specs(canon)
+        canonical_id = specs[0].canonical_id if specs else canon
+        etype = specs[0].type if specs else "spec"
+        ent = kg_service.upsert_entity(db, canonical_id=canonical_id, type_=etype, name=canonical_id)
+        for ch in slot["chunks"]:
+            src = _section_entity_for_chunk(db, document_id, ch)
+            if not src or src.id == ent.id:
+                continue
+            if kg_service.upsert_relation(
+                    db, src_id=src.id, dst_id=ent.id, rel_type="references",
+                    document_id=document_id, chunk_id=ch.id, confidence=0.9,
+                    evidence=f"{_CITE_EVIDENCE_PREFIX}{model} 抽取，原文頁 {ch.page} 字面查核通過"):
+                n_edges += 1
+    result["n_edges"] = n_edges
+    return result
+
+
+def _chat_ollama_cite(prompt: str, model: str) -> str:
+    """引用抽取的批次呼叫：keep_alive 給 10m 讓整批共用一次載入，
+    與 _chat_ollama（keep_alive=0，單發決策）需求不同。呼叫端跑完整批後
+    模型會在閒置 10 分鐘後自行卸載。"""
+    payload = {
+        "model": model, "stream": False, "format": "json", "keep_alive": "10m",
+        "think": False,
+        "options": {"temperature": 0.0, "num_ctx": 8192},
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    req = urllib.request.Request(
+        f"{settings.OLLAMA_BASE_URL}/api/chat",
+        json.dumps(payload).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=600) as r:
+        return json.loads(r.read())["message"]["content"]
+
+
+def remove_citations(db: Session, document_id: str) -> int:
+    """整批回退本功能建立的引用邊（實體保留，與 delete_kg_for_document 一致）。"""
+    n = (db.query(models.KGRelation)
+         .filter(models.KGRelation.document_id == document_id,
+                 models.KGRelation.evidence.like(f"{_CITE_EVIDENCE_PREFIX}%"))
+         .delete(synchronize_session=False))
+    return n
+
+
+def run_citation_task(task_id: str, document_id: str, model: Optional[str] = None) -> None:
+    """背景任務入口：自開 session、寫進度、結果寫回 background_tasks。"""
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+        if task:
+            task.status = "running"; task.message = "LLM 引用抽取中..."
+            db.commit()
+
+        def _cb(i, total):
+            if task and total and i % 10 == 0:
+                task.progress = int(i * 100 / total)
+                db.commit()
+
+        res = extract_citations(db, document_id, model, apply=True, progress_cb=_cb)
+        db.commit()
+        if task:
+            task.status = "completed"; task.progress = 100
+            task.message = (f"引用抽取完成：{len(res['citations'])} 個規範 / "
+                            f"{res.get('n_edges', 0)} 條邊（查核剔除 {res['n_rejected']} 筆）")
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("引用抽取任務失敗 %s", document_id)
+        db.rollback()
+        task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+        if task:
+            task.status = "failed"; task.message = f"引用抽取失敗: {e}"
+            db.commit()
+    finally:
+        db.close()
