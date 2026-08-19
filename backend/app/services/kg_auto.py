@@ -56,14 +56,46 @@ _AUTO_MIN_ENTITIES = 3
 _AUTO_MAX_SKIP_RATIO = 0.34
 
 
-def _chat_ollama(prompt: str, model: str) -> str:
-    """直接呼叫 Ollama HTTP API 而不走 ollama_client：需要 keep_alive=0
+def _parse_json_loose(raw: str) -> Dict[str, Any]:
+    """雲端模型沒有 format=json 保證，可能包 ``` 圍籬或前後綴文字。"""
+    raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.M).strip()
+    i, j = raw.find("{"), raw.rfind("}")
+    if i < 0 or j <= i:
+        raise ValueError("回應中找不到 JSON 物件")
+    return json.loads(raw[i:j + 1])
+
+
+def _chat(prompt: str, model_spec: Optional[str], *, keep_alive: Any = 0,
+          num_ctx: int = 4096) -> str:
+    """抽取用的 LLM 呼叫，雙後端：
+
+      model_spec 為空        → 跟隨系統當前文字模型（LLM_PROVIDER=aihub 的
+                               機器自動走雲端 —— 沒有大地端模型的部署靠這條）
+      "aihub" / "aihub:別名" → 強制 AiHub（GPT-OSS 等雲端模型）
+      其他字串               → 當作 Ollama tag 走地端
+
+    Ollama 走原生 HTTP 而不走 ollama_client：需要逐呼叫 keep_alive
     （建議模型可能是 17GB 的大傢伙，用完必須讓出 VRAM，而 client 的
-    keep_alive 是全域設定，改它會影響翻譯/嵌入模型的常駐策略）。"""
+    keep_alive 是全域設定）。AiHub 溫度下限 0.2（閘道限制）。"""
+    spec = (model_spec or "").strip()
+    if not spec:
+        from .llm_provider import get_llm_provider
+        p = get_llm_provider()
+        if getattr(p, "name", "") == "aihub":
+            return p.chat([{"role": "user", "content": prompt}],
+                          options={"temperature": 0.2})
+        spec = settings.OLLAMA_LLM_MODEL
+    if spec.lower().startswith("aihub"):
+        from .llm_provider.aihub_provider import AiHubProvider
+        alias = spec.split(":", 1)[1].strip() if ":" in spec else None
+        p = AiHubProvider(settings.AIHUB_API_KEY or "", settings.AIHUB_BASE_URL,
+                          default_model=getattr(settings, "AIHUB_MODEL", None))
+        return p.chat([{"role": "user", "content": prompt}],
+                      model=alias, options={"temperature": 0.2})
     payload = {
-        "model": model, "stream": False, "format": "json", "keep_alive": 0,
+        "model": spec, "stream": False, "format": "json", "keep_alive": keep_alive,
         "think": False,
-        "options": {"temperature": 0.0, "num_ctx": 4096},
+        "options": {"temperature": 0.0, "num_ctx": num_ctx},
         "messages": [{"role": "user", "content": prompt}],
     }
     req = urllib.request.Request(
@@ -84,8 +116,8 @@ def _suggest_one(t: Dict[str, Any], model: str) -> Dict[str, Any]:
               .replace("{n_rows}", str(t.get("n_rows")))
               .replace("{headers}", json.dumps(t.get("headers") or [], ensure_ascii=False))
               .replace("{rows}", _rows_text(t)))
-    raw = _chat_ollama(prompt, model)
-    d = json.loads(raw)
+    raw = _chat(prompt, model)
+    d = _parse_json_loose(raw)
     pairs = []
     for p in d.get("col_pairs") or []:
         try:
@@ -136,7 +168,7 @@ def _verify_pairs(db: Session, document_id: str, table_key: str,
 
 def suggest(db: Session, document_id: str, model: Optional[str] = None) -> Dict[str, Any]:
     """對文件所有表格產生抽取建議 + 驗證結果。只乾跑，不寫入。"""
-    model = (model or "").strip() or settings.OLLAMA_LLM_MODEL
+    model = (model or "").strip()   # 空字串＝跟隨系統當前文字模型（見 _chat）
     tables = kg_tables.detect_tables(db, document_id)
     out: List[Dict[str, Any]] = []
     for t in tables:
@@ -207,7 +239,7 @@ def _merge_groups(suggestions: List[Dict[str, Any]], model: str) -> List[Dict[st
         if len(names) > 1:
             sample = sorted(set().union(*(codes[i] for i in members)))[:8]
             try:
-                d = json.loads(_chat_ollama(
+                d = _parse_json_loose(_chat(
                     _UNIFY_PROMPT.replace("{names}", json.dumps(names, ensure_ascii=False))
                                  .replace("{samples}", json.dumps(sample, ensure_ascii=False)),
                     model))
@@ -342,7 +374,7 @@ def extract_citations(db: Session, document_id: str, model: Optional[str] = None
     供整批回退。呼叫端負責 commit。"""
     from . import kg_extractor
 
-    model = (model or "").strip() or settings.OLLAMA_LLM_MODEL
+    model = (model or "").strip()   # 空＝跟隨系統當前文字模型
     q = (db.query(models.DocumentChunk)
          .filter(models.DocumentChunk.document_id == document_id))
     if page_lo is not None:
@@ -358,8 +390,8 @@ def extract_citations(db: Session, document_id: str, model: Optional[str] = None
         if progress_cb:
             progress_cb(i, len(chunks))
         try:
-            raw = _chat_ollama_cite(_CITE_PROMPT + text, model)
-            cites = [str(c).strip() for c in (json.loads(raw).get("citations") or [])
+            raw = _chat(_CITE_PROMPT + text, model, keep_alive="10m", num_ctx=8192)
+            cites = [str(c).strip() for c in (_parse_json_loose(raw).get("citations") or [])
                      if str(c).strip()]
         except Exception as e:  # noqa: BLE001 — 單塊失敗跳過，不拖垮整批
             logger.warning("引用抽取失敗 chunk=%s: %s", ch.id, e)
@@ -402,23 +434,6 @@ def extract_citations(db: Session, document_id: str, model: Optional[str] = None
                 n_edges += 1
     result["n_edges"] = n_edges
     return result
-
-
-def _chat_ollama_cite(prompt: str, model: str) -> str:
-    """引用抽取的批次呼叫：keep_alive 給 10m 讓整批共用一次載入，
-    與 _chat_ollama（keep_alive=0，單發決策）需求不同。呼叫端跑完整批後
-    模型會在閒置 10 分鐘後自行卸載。"""
-    payload = {
-        "model": model, "stream": False, "format": "json", "keep_alive": "10m",
-        "think": False,
-        "options": {"temperature": 0.0, "num_ctx": 8192},
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    req = urllib.request.Request(
-        f"{settings.OLLAMA_BASE_URL}/api/chat",
-        json.dumps(payload).encode(), {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return json.loads(r.read())["message"]["content"]
 
 
 def remove_citations(db: Session, document_id: str) -> int:

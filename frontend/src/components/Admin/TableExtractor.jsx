@@ -188,11 +188,13 @@ const TableExtractor = () => {
         <Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 8 }}>
           由本地 LLM 逐表判斷「值不值得抽、母節點叫什麼、哪欄是代號」，規則引擎逐列建節點並驗證；
           被 OCR 切散的同批表格會自動合併成一個母節點（其餘命名存為別名）。大模型逐表分析，
-          一份文件約需 2~5 分鐘。
+          一份文件約需 2~5 分鐘。模型欄：留空＝跟隨系統文字模型；填 Ollama tag（建議
+          qwen3.8:27b，判斷力實測最佳）或 aihub / aihub:gpt-oss 走雲端 —— 雲端建議品質
+          實測較弱，套用前請先用「產生建議」人工確認。
         </Paragraph>
         <Space wrap>
-          <Input placeholder="模型（留空＝系統預設，例：qwen3.8:27b）" value={autoModel}
-                 onChange={(e) => setAutoModel(e.target.value)} style={{ width: 280 }} />
+          <Input placeholder="留空＝跟隨系統文字模型；或填 ollama tag / aihub" value={autoModel}
+                 onChange={(e) => setAutoModel(e.target.value)} style={{ width: 300 }} />
           <Button onClick={doAutoSuggest} loading={autoLoading} disabled={!docId}>
             產生建議（不寫入）
           </Button>
