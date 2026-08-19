@@ -169,6 +169,20 @@ const TableExtractor = () => {
         }
       />
 
+      <Card size="small" type="inner" style={{ marginBottom: 16, background: "#f6ffed" }}
+            title={<Text strong>步驟 1：選擇要處理的文件（三種抽取方式共用）</Text>}>
+        <Space wrap>
+          <Select
+            showSearch optionFilterProp="label" placeholder="先按右上角「載入文件清單」再選"
+            value={docId} onChange={loadTables} loading={loading} allowClear
+            style={{ minWidth: 380 }}
+            options={docs.map((d) => ({ value: d.id, label: d.title }))}
+          />
+          {!docs.length && <Button size="small" onClick={loadDocs}>載入文件清單</Button>}
+          {docId && <Tag color="green">已選定，下方三種方式皆對此文件操作</Tag>}
+        </Space>
+      </Card>
+
       <Card size="small" type="inner" style={{ marginBottom: 16 }}
             title={<Space><ExperimentOutlined />AI 自動建議（零手動設定）</Space>}>
         <Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 8 }}>
@@ -250,13 +264,6 @@ const TableExtractor = () => {
 
       <Form form={form} layout="vertical" onFinish={doPreview}>
         <Space wrap align="start" style={{ width: "100%" }}>
-          <Form.Item label="文件" style={{ minWidth: 320 }}>
-            <Select
-              showSearch optionFilterProp="label" placeholder="先按右上角載入文件清單"
-              value={docId} onChange={loadTables} loading={loading} allowClear
-              options={docs.map((d) => ({ value: d.id, label: d.title }))}
-            />
-          </Form.Item>
           <Form.Item label="表格" name="table_key" rules={[{ required: true, message: "請選表格" }]} style={{ minWidth: 340 }}>
             <Select
               placeholder={tables.length ? "選擇要抽取的表格" : "（選了文件才會列出）"}
