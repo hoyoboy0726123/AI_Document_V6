@@ -327,13 +327,18 @@ def auto_apply_tables(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """套用 AI 建議：verdict=auto 的自動寫入；body.keys 指定的表（使用者看過
-    預覽放行）即使 review 也寫入。body 可帶 {"model": ..., "keys": [...]}。"""
+    """套用 AI 建議。兩種模式：
+    - body.groups 存在：套用「使用者審核過的」建議原文（不重跑 LLM），
+      支援逐條排除（exclude_codes）與改名 —— 審核 UI 走這條。
+    - 否則：舊行為，重新 suggest 後套用 verdict=auto 的群組。"""
     _ = current_user
     if not db.query(models.Document).filter_by(id=document_id).first():
         raise HTTPException(status_code=404, detail="找不到文件")
     body = body or {}
-    res = kg_auto.auto_apply(db, document_id, body.get("model"), body.get("keys"))
+    if body.get("groups"):
+        res = kg_auto.apply_reviewed(db, document_id, body["groups"])
+    else:
+        res = kg_auto.auto_apply(db, document_id, body.get("model"), body.get("keys"))
     db.commit()
     return res
 

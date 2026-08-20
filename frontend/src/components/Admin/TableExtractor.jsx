@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  Alert, Button, Card, Empty, Form, Input, Modal, Select, Space, Table, Tag, Typography, message,
+  Alert, Button, Card, Collapse, Empty, Form, Input, Modal, Select, Space, Table, Tag, Typography, message,
 } from "antd";
 import { ExperimentOutlined, NodeIndexOutlined, UndoOutlined } from "@ant-design/icons";
 import apiClient from "../../services/api";
@@ -28,13 +28,15 @@ const TableExtractor = () => {
   const [autoModel, setAutoModel] = useState("");
   const [autoLoading, setAutoLoading] = useState(false);
   const [autoResult, setAutoResult] = useState(null);
+  const [reviewEdits, setReviewEdits] = useState({});   // {群組idx: {name, excluded:[]}}
+  const [applyingReview, setApplyingReview] = useState(false);
   const [form] = Form.useForm();
 
   // AI 自動建議：LLM 判斷每張表值不值得抽、母節點與欄位；規則引擎乾跑驗證。
   // 大模型逐表分析，一份文件可能要幾分鐘 —— 按鈕上有講，不做輪詢花俏功能。
   const doAutoSuggest = async () => {
     if (!docId) return;
-    setAutoLoading(true); setAutoResult(null);
+    setAutoLoading(true); setAutoResult(null); setReviewEdits({});
     try {
       const r = await apiClient.post(`kg/tables/${docId}/auto-suggest`,
         autoModel ? { model: autoModel } : {}, { timeout: 900000 });
@@ -46,19 +48,33 @@ const TableExtractor = () => {
     }
   };
 
-  const doAutoApply = async () => {
-    if (!docId) return;
-    setAutoLoading(true);
+  // 審核後套用：把「使用者眼前審核的內容」原封送回（含改名與排除清單），
+  // 後端確定性執行、不重跑 LLM —— 否則審 A 版寫入 B 版，審核就沒有意義。
+  const doApplyReviewed = async () => {
+    if (!docId || !autoResult) return;
+    const groups = (autoResult.groups ?? []).map((g, i) => {
+      const edit = reviewEdits[i] || {};
+      const excluded = edit.excluded ?? [];
+      if ((g.entities ?? []).length - excluded.length <= 0) return null;   // 全不勾＝整組跳過
+      return {
+        primary_name: (edit.name ?? g.primary_name).trim(),
+        aliases: g.aliases ?? [],
+        entity_type: g.entity_type ?? "term",
+        members: g.members ?? [],
+        exclude_codes: excluded,
+      };
+    }).filter(Boolean);
+    if (!groups.length) { message.warning("沒有勾選任何項目"); return; }
+    setApplyingReview(true);
     try {
-      const r = await apiClient.post(`kg/tables/${docId}/auto-apply`,
-        autoModel ? { model: autoModel } : {}, { timeout: 900000 });
+      const r = await apiClient.post(`kg/tables/${docId}/auto-apply`, { groups });
       const names = (r.data.applied ?? []).map((a) => `「${a.primary_name}」×${a.n_contains_total}`);
-      message.success(names.length ? `已建立：${names.join("、")}` : "沒有可自動套用的表格");
-      setAutoResult(null);
+      message.success(`已建立：${names.join("、")}`);
+      setAutoResult(null); setReviewEdits({});
     } catch (e) {
-      message.error(e.response?.data?.detail ?? "自動套用失敗");
+      message.error(e.response?.data?.detail ?? "套用失敗");
     } finally {
-      setAutoLoading(false);
+      setApplyingReview(false);
     }
   };
 
@@ -231,27 +247,77 @@ const TableExtractor = () => {
         <Space wrap>
           <Input placeholder="留空＝跟隨系統文字模型；或填 ollama tag / aihub" value={autoModel}
                  onChange={(e) => setAutoModel(e.target.value)} style={{ width: 300 }} />
-          <Button onClick={doAutoSuggest} loading={autoLoading} disabled={!docId}>
-            產生建議（不寫入）
-          </Button>
-          <Button type="primary" onClick={doAutoApply} loading={autoLoading} disabled={!docId}>
-            自動建議並套用
+          <Button type="primary" onClick={doAutoSuggest} loading={autoLoading} disabled={!docId}>
+            產生建議（供審核，不寫入）
           </Button>
         </Space>
         {autoResult && (
           <div style={{ marginTop: 12 }}>
-            {(autoResult.groups ?? []).map((g, i) => (
-              <div key={i} style={{ fontSize: 13, marginBottom: 4 }}>
-                <Tag color={g.verdict === "auto" ? "green" : "orange"}>{g.verdict}</Tag>
-                <Text strong>{g.primary_name}</Text>
-                {g.aliases?.length > 0 && <Text type="secondary">（別名：{g.aliases.join("、")}）</Text>}
-                <Text type="secondary" style={{ marginLeft: 8 }}>{g.n_codes_union} 個項目，來自 {g.member_keys.length} 張表</Text>
-              </div>
-            ))}
-            {(autoResult.suggestions ?? []).filter((s) => s.verdict === "skip").length > 0 && (
+            <Collapse
+              size="small"
+              items={(autoResult.groups ?? []).map((g, i) => ({
+                key: String(i),
+                label: (
+                  <Space wrap>
+                    <Tag color={g.verdict === "auto" ? "green" : "orange"}>{g.verdict}</Tag>
+                    <Text strong>{reviewEdits[i]?.name ?? g.primary_name}</Text>
+                    {g.aliases?.length > 0 && <Text type="secondary">（別名：{g.aliases.join("、")}）</Text>}
+                    <Text type="secondary">
+                      勾選 {(g.entities ?? []).length - (reviewEdits[i]?.excluded?.length ?? 0)}/{(g.entities ?? []).length} 條，來自 {g.member_keys.length} 張表
+                    </Text>
+                  </Space>
+                ),
+                children: (
+                  <div>
+                    <Space style={{ marginBottom: 8 }}>
+                      <Text type="secondary" style={{ fontSize: 13 }}>母節點名稱</Text>
+                      <Input
+                        size="small" style={{ width: 220 }}
+                        value={reviewEdits[i]?.name ?? g.primary_name}
+                        onChange={(e) => setReviewEdits((prev) => ({
+                          ...prev, [i]: { ...prev[i], name: e.target.value } }))}
+                      />
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        （使用者提問會用的稱呼；路由靠它比對）
+                      </Text>
+                    </Space>
+                    <Table
+                      size="small" bordered
+                      pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
+                      rowKey="code"
+                      dataSource={g.entities ?? []}
+                      rowSelection={{
+                        selectedRowKeys: (g.entities ?? []).map((e) => e.code)
+                          .filter((c) => !(reviewEdits[i]?.excluded ?? []).includes(c)),
+                        onChange: (keys) => {
+                          const excluded = (g.entities ?? []).map((e) => e.code)
+                            .filter((c) => !keys.includes(c));
+                          setReviewEdits((prev) => ({ ...prev, [i]: { ...prev[i], excluded } }));
+                        },
+                      }}
+                      columns={[
+                        { title: "代號", dataIndex: "code", width: 110 },
+                        { title: "名稱", dataIndex: "name" },
+                      ]}
+                    />
+                  </div>
+                ),
+              }))}
+            />
+            <Space style={{ marginTop: 12 }} wrap>
+              <Button type="primary" loading={applyingReview} onClick={doApplyReviewed}>
+                套用審核結果（寫入勾選項目）
+              </Button>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                另有 {(autoResult.suggestions ?? []).filter((s) => s.verdict === "skip").length} 張表被判定不值得抽（排版表/清單快照等）
+                套用的就是你眼前審核的內容 —— 不會重跑 LLM
               </Text>
+            </Space>
+            {(autoResult.suggestions ?? []).filter((s) => s.verdict === "skip").length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  另有 {(autoResult.suggestions ?? []).filter((s) => s.verdict === "skip").length} 張表被判定不值得抽（排版表/清單快照等）
+                </Text>
+              </div>
             )}
           </div>
         )}

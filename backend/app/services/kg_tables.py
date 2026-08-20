@@ -145,6 +145,7 @@ def build_plan(db: Session, document_id: str, spec: Dict[str, Any]) -> Dict[str,
     entities: List[Dict[str, str]] = []
     skipped: List[Dict[str, str]] = []
     seen: set = set()
+    exclude = {str(c).strip() for c in (spec.get("exclude_codes") or []) if str(c).strip()}
     for row in table["rows"]:
         if id_col >= len(row) or label_col >= len(row):
             skipped.append({"row": " | ".join(row), "why": "欄位數不足"})
@@ -152,6 +153,9 @@ def build_plan(db: Session, document_id: str, spec: Dict[str, Any]) -> Dict[str,
         code, label = row[id_col].strip(), row[label_col].strip()
         if code.lower() in _JUNK or label.lower() in _JUNK:
             skipped.append({"row": " | ".join(row), "why": "空值或表頭殘留"})
+            continue
+        if code in exclude:
+            skipped.append({"row": " | ".join(row), "why": "使用者審核排除"})
             continue
         cid = f"{parent_name}:{code}"
         if cid in seen:

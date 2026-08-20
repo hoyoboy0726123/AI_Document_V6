@@ -152,7 +152,9 @@ def _verify_pairs(db: Session, document_id: str, table_key: str,
             return {"verdict": "error", "why": plan["error"], "plans": []}
         plans.append({**p, "n_entities": plan["n_entities"],
                       "n_skipped": len(plan["skipped"]),
-                      "entities_preview": plan["entities"][:5],
+                      # 完整明細（非前 5 筆預覽）：審核 UI 要讓使用者逐條看到
+                      # 代號與名稱 —— 只給數字沒辦法審
+                      "entities": plan["entities"],
                       "codes": [e["code"] for e in plan["entities"]]})
         total_entities += plan["n_entities"]
         total_skipped += len(plan["skipped"])
@@ -250,10 +252,19 @@ def _merge_groups(suggestions: List[Dict[str, Any]], model: str) -> List[Dict[st
                                       if a and a != primary})
             except Exception as e:  # noqa: BLE001 — 統一命名失敗就用預設主名稱
                 logger.warning("母節點統一命名失敗（沿用預設 %s）: %s", primary, e)
+        merged: Dict[str, str] = {}
+        for x in subs:
+            for pl in x.get("plans") or []:
+                for e in pl.get("entities") or []:
+                    if e["code"] not in merged or len(e["name"]) > len(merged[e["code"]]):
+                        merged[e["code"]] = e["name"]
         out.append({
             "primary_name": primary,
             "aliases": aliases,
             "member_keys": [x["table"]["key"] for x in subs],
+            # 審核後套用需要的完整資訊：成員表與欄位設定、逐條明細
+            "members": [{"key": x["table"]["key"], "col_pairs": x["col_pairs"]} for x in subs],
+            "entities": [{"code": c, "name": n} for c, n in sorted(merged.items())],
             "n_codes_union": len(set().union(*(codes[i] for i in members))),
             "verdict": "auto" if any(x.get("verdict") == "auto" for x in subs) else "review",
             "entity_type": subs[0].get("entity_type") or "term",
@@ -307,6 +318,51 @@ def auto_apply(db: Session, document_id: str, model: Optional[str] = None,
                         "member_keys": g["member_keys"], "n_new_entities": n_ent,
                         "n_new_relations": n_rel, "n_contains_total": n_contains})
     return {"model": res["model"], "applied": applied, "skipped": skipped}
+
+
+def apply_reviewed(db: Session, document_id: str,
+                   groups: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """套用「使用者審核過的」建議 —— 不重跑 LLM。
+
+    為什麼必須有這條路：舊的 auto_apply 會重新 suggest 一次，使用者在 UI
+    審的是 A 版建議、實際寫入的可能是 B 版（LLM 每次輸出可能不同）。
+    審核要有意義，套用就必須逐字用審核當下的內容：前端把建議原封帶回
+    （成員表、欄位設定、母節點名、別名、排除清單），這裡確定性執行。
+    """
+    applied = []
+    for g in groups or []:
+        name = re.sub(r"\s+", "", str(g.get("primary_name") or ""))[:60]
+        if not name:
+            continue
+        etype = (str(g.get("entity_type") or "term").strip() or "term")[:30]
+        exclude = [str(c) for c in (g.get("exclude_codes") or [])]
+        aliases = [str(a)[:60] for a in (g.get("aliases") or []) if a and a != name]
+        n_ent = n_rel = 0
+        for m in g.get("members") or []:
+            key = str(m.get("key") or "")
+            for pair in m.get("col_pairs") or []:
+                r = kg_tables.apply_plan(db, document_id, {
+                    "table_key": key, "parent_name": name, "entity_type": etype,
+                    "id_col": pair.get("id_col"), "label_col": pair.get("label_col"),
+                    "exclude_codes": exclude})
+                if r.get("error"):
+                    logger.warning("apply_reviewed 套用失敗 %s: %s", key, r["error"])
+                    continue
+                n_ent += r["n_entities"]; n_rel += r["n_relations"]
+        parent = db.query(models.KGEntity).filter_by(canonical_id=name).first()
+        n_contains = 0
+        if parent:
+            if aliases:
+                meta = dict(parent.meta or {})
+                meta["aliases"] = sorted(set(meta.get("aliases") or []) | set(aliases))
+                parent.meta = meta
+            n_contains = (db.query(models.KGRelation)
+                          .filter(models.KGRelation.src_id == parent.id,
+                                  models.KGRelation.rel_type == "contains").count())
+        applied.append({"primary_name": name, "aliases": aliases,
+                        "n_new_entities": n_ent, "n_new_relations": n_rel,
+                        "n_excluded": len(exclude), "n_contains_total": n_contains})
+    return {"applied": applied, "skipped": []}
 
 
 # ═════════════════════════ 散文引用抽取（LLM） ═════════════════════════
