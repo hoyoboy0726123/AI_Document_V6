@@ -12,7 +12,7 @@ Graphify 式「LLM 自由抽取三元組」實測輸給確定性表格抽取（m
 欄位對映，會直接反映在乾跑預覽裡，不會靜默污染圖譜。
 
 模型：預設走本地 Ollama（表格內容不出門）。建議用大一點的本地模型
-（如 qwen3.8:27b）；呼叫帶 keep_alive=0，用完即卸載，不佔住 VRAM。
+（如 qwen3.8:27b）；批次呼叫共用一次載入（keep_alive=10m），閒置後自動卸載。
 """
 from __future__ import annotations
 
@@ -116,7 +116,10 @@ def _suggest_one(t: Dict[str, Any], model: str) -> Dict[str, Any]:
               .replace("{n_rows}", str(t.get("n_rows")))
               .replace("{headers}", json.dumps(t.get("headers") or [], ensure_ascii=False))
               .replace("{rows}", _rows_text(t)))
-    raw = _chat(prompt, model)
+    # keep_alive=10m：一份文件 15 張表批次分析，逐呼叫卸載會付 15 次
+    # 重載（各 ~10 秒），實測 UI 一輪 7 分鐘、其中一半在搬模型。批次結束
+    # 閒置 10 分鐘後自動卸載，VRAM 不會被長期佔住。
+    raw = _chat(prompt, model, keep_alive="10m")
     d = _parse_json_loose(raw)
     pairs = []
     for p in d.get("col_pairs") or []:
@@ -244,7 +247,7 @@ def _merge_groups(suggestions: List[Dict[str, Any]], model: str) -> List[Dict[st
                 d = _parse_json_loose(_chat(
                     _UNIFY_PROMPT.replace("{names}", json.dumps(names, ensure_ascii=False))
                                  .replace("{samples}", json.dumps(sample, ensure_ascii=False)),
-                    model))
+                    model, keep_alive="10m"))
                 nm = re.sub(r"\s+", "", str(d.get("name") or ""))[:60]
                 if nm:
                     primary = nm
